@@ -141,9 +141,7 @@ Extracted Preferences:
     chain = prompt | llm | StrOutputParser()
 
     response = chain.invoke({"chat_history": chat_history_str})
-    st.write("LLM Raw Response:", response)
     cleaned_response = clean_response(response)
-    st.write("Cleaned Response:", cleaned_response)
 
     try:
         preferences = json.loads(cleaned_response)
@@ -409,7 +407,6 @@ def get_response(user_query: str, chat_history: list):
     try:
         intent = intent_sequence.invoke({"chat_history": chat_history, "user_query": user_query})
     except Exception as e:
-        st.write(f"Error classifying intent: {e}")
         return "Sorry, I encountered an error. Please try again."
 
     intent = intent.lower()
@@ -445,24 +442,19 @@ Your Response:
 """
         new_preferences = extract_preferences(new_history)
         st.session_state["preferences"] = {**st.session_state.get("preferences", {}), **new_preferences}
-        st.write("Merged Preferences:", st.session_state["preferences"])
         save_preferences_to_file(st.session_state["preferences"])
-        st.write("Preferences saved to JSON file.")
         current_preferences = st.session_state["preferences"]
 
         if not all_info_collected(current_preferences):
-            st.write("All Info Collected: False")
             st.session_state["collecting_info"] = True
             chain = collect_customer_info()
             response = chain.invoke({"question": user_query, "chat_history": chat_history})
             return response
 
-        st.write("All Info Collected: True")
         st.session_state["collecting_info"] = False
 
         try:
             sql_query = generate_query_from_preferences(new_history, user_query)
-            st.write("Generated SQL Query:", sql_query)
             results = execute_query(sql_query)
 
             if results["status"] == "success":
@@ -479,7 +471,6 @@ Your Response:
                 return results["message"]
 
         except Exception as e:
-            st.write(f"Error during query execution: {e}")
             return "An error occurred while processing your request."
 
     elif "viewing_request" in intent:
