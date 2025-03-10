@@ -493,15 +493,14 @@ Your Response:
         return "I'm not sure how to respond to that. Could you please clarify?"
 
 # --- UI Setup ---
-st.title("Adobha Co-living Assistant")
+st.title("GenZI Care Chat Bot")
 
 with st.sidebar:
     st.subheader("About Adobha Co-living")
-    st.write("Singapore’s OG co-living since 2013.")
+    st.write("Singapore’s pioneer in co-living since 2013.")
     st.subheader("Our Offerings")
     st.write("• We provide a variety of fully furnished rooms with flexible lease terms and all-inclusive pricing.")
-    st.subheader("Contact Us")
-    st.write("📞 +65 6123 4567\n📧 info@adobha.sg\n🌐 www.adobha.sg")
+    st.subheader("Developed by GenZI care")
     if st.button("Reset Chat"):
         st.session_state["chat_history"] = [AIMessage(content="Hi there! I’m Justine from Adobha Co-living. How can I assist you today?")]
         st.session_state["preferences"] = {}

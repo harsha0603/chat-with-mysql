@@ -6,3 +6,4 @@ langchain-openai
 mysql-connector-python
 groq
 langchain-groq
+sqlparse
