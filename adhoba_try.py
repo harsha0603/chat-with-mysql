@@ -274,7 +274,7 @@ def execute_query(query: str):
 # --- Response Chains for Final Answer ---
 def get_property_info_chain():
     template = """
-You are Justine from Adobha Co-living, here to assist in a friendly and respectful way.
+    You are Justine from Adobha Co-living, here to assist in a friendly and respectful way.
 
 The user is looking for available **rooms** for rent, and here’s what I found:
 
@@ -295,17 +295,43 @@ If there are no matching **rooms**, inform the user and suggest alternative opti
 If there are multiple options, list the **rooms** briefly.
 Do not mention the <RESULTS> tags in your response.
 
+**Room Details:**
+Please provide a summary of the room, including the location, price, availability date, tenant mix, and key amenities (e.g., air conditioning, proximity to MRT).
+
 **Washroom Details:**
-The washroom details are provided in the "WashroomDetails" column. Each entry represents a washroom and is formatted as follows:
+The washroom details are provided in the "WashroomDetails" column of the provided data.
+Each entry represents a washroom and is formatted as follows:
 "washroomno|size|bathtub|location|bidetspray|totalusers|usedrooms"
 Multiple washrooms are separated by "; ".
-Please parse these details and present them in a clear, readable format.
+Please parse these details and present them in a clear, readable format, reporting the details exactly as they appear.
+Do not add any extra information or invent any details that are not present in the "WashroomDetails" column.
+Keep the washroom details concise and focus on the most relevant information.
+
+Example:
+Input: "Juniorbath|Standard|No|Within Room|No|1|80; MasterBath|Large|No|Within Room|No|1|79"
+Output:
+- Juniorbath:
+    - Size: Standard
+    - Bathtub: No
+    - Location: Within Room
+    - Bidet Spray: No
+    - Total Users: 1
+    - Used Rooms: 80
+- MasterBath:
+    - Size: Large
+    - Bathtub: No
+    - Location: Within Room
+    - Bidet Spray: No
+    - Total Users: 1
+    - Used Rooms: 79
+
 If the "WashroomDetails" column is empty or null, state "No washroom details available."
 
 Ask the user if they would like to schedule a viewing of any of the **rooms** or if they have any further questions.
 
 Justine’s response:
 """
+    
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatOpenAI(model="gpt-4-0125-preview")
     return prompt | llm | StrOutputParser()
@@ -378,7 +404,6 @@ def all_info_collected(preferences):
 # --- Main Response Function ---
 def get_response(user_query: str, chat_history: list):
     new_history = chat_history + [HumanMessage(content=user_query)]
-    
 
     intent_sequence = classify_intent(chat_history, user_query)
     try:
@@ -387,9 +412,13 @@ def get_response(user_query: str, chat_history: list):
         st.write(f"Error classifying intent: {e}")
         return "Sorry, I encountered an error. Please try again."
 
-    if "general" in intent.lower() or "casual_conversation" in intent.lower():
+    intent = intent.lower()
+
+    if "general" in intent or "casual_conversation" in intent:
         casual_prompt = """
-You are having a casual conversation with the user. Respond appropriately.
+You are Justine from Adobha Co-living, having a casual conversation with the user. Respond appropriately, maintaining a natural and friendly conversational flow.
+
+If the user expresses gratitude, acknowledges your assistance, apologizes, or makes a similar conversational turn, respond appropriately and then seamlessly continue the conversation or ask how you can further assist them.
 
 Conversation History:
 {chat_history}
@@ -402,7 +431,18 @@ Your Response:
         response = generate_llm_response(new_history, user_query, casual_prompt)
         return response
 
-    elif "property_search" in intent.lower():
+    elif "property_search" in intent:
+        property_prompt = """
+You are Justine from Adobha Co-living, assisting a customer with a property search. Respond appropriately.
+
+Conversation History:
+{chat_history}
+
+User's Message:
+{user_query}
+
+Your Response:
+"""
         new_preferences = extract_preferences(new_history)
         st.session_state["preferences"] = {**st.session_state.get("preferences", {}), **new_preferences}
         st.write("Merged Preferences:", st.session_state["preferences"])
@@ -442,23 +482,23 @@ Your Response:
             st.write(f"Error during query execution: {e}")
             return "An error occurred while processing your request."
 
-    elif "viewing_request" in intent.lower():
+    elif "viewing_request" in intent:
         viewing_prompt = """
-The user has requested a viewing. Respond appropriately by:
+You are Justine from Adobha Co-living. The user has requested a viewing. Respond appropriately by:
 
 1. **Confirming Availability:**
-   - Ask the user to specify their preferred date and time for the viewing.
-   - If they have already provided a date and time, confirm that you have recorded it.
+    - Ask the user to specify their preferred date and time for the viewing.
+    - If they have already provided a date and time, confirm that you have recorded it.
 
 2. **Providing Room Address:**
-   - Provide the complete address of the room they wish to view.
+    - Provide the complete address of the room they wish to view.
 
 3. **Arrival Instructions:**
-   - Ask the customer to notify you when they arrive at the location.
-   - If applicable, mention who they should ask for or where they should go upon arrival.
+    - Ask the customer to notify you when they arrive at the location.
+    - If applicable, mention who they should ask for or where they should go upon arrival.
 
 4. **Expressing Gratitude:**
-   - Thank the user for choosing Adobha Co-living.
+    - Thank the user for choosing Adobha Co-living.
 
 Conversation History:
 {chat_history}
@@ -471,9 +511,9 @@ Your Response:
         response = generate_llm_response(new_history, user_query, viewing_prompt)
         return response
 
-    elif "information_request" in intent.lower():
+    elif "information_request" in intent:
         info_prompt = """
-The user has requested information. Respond appropriately.
+You are Justine from Adobha Co-living. The user has requested information. Respond appropriately.
 
 Conversation History:
 {chat_history}
@@ -486,12 +526,11 @@ Your Response:
         response = generate_llm_response(new_history, user_query, info_prompt)
         return response
 
-    elif "error" in intent.lower():
+    elif "error" in intent:
         return "Sorry, I encountered an error while processing your request. Please try again or rephrase your query."
 
     else:
         return "I'm not sure how to respond to that. Could you please clarify?"
-
 # --- UI Setup ---
 st.title("GenZI Care Chat Bot")
 
@@ -505,7 +544,7 @@ with st.sidebar:
         st.session_state["chat_history"] = [AIMessage(content="Hi there! I’m Justine from Adobha Co-living. How can I assist you today?")]
         st.session_state["preferences"] = {}
         st.session_state["collecting_info"] = False
-        st.experimental_rerun()
+        st.rerun()
 
 # --- Chat UI ---
 for message in st.session_state["chat_history"]:
