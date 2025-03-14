@@ -6,6 +6,9 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 import sqlparse
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from langchain_community.utilities.sql_database import SQLDatabase
 from langchain_core.messages import AIMessage, HumanMessage
@@ -15,7 +18,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-st.set_page_config(page_title="Adobha Co-living Assistant", page_icon="🏠")
+st.set_page_config(page_title="Aba Co-living Assistant", page_icon="🏠")
 # Load env vars
 load_dotenv()
 
@@ -36,9 +39,21 @@ def load_preferences_from_file():
 
 # Set up session state
 if "chat_history" not in st.session_state:
-    st.session_state["chat_history"] = [AIMessage(content="Hi there! I’m Justine from Adobha Co-living. How can I assist you today?")]
+    st.session_state["chat_history"] = [AIMessage(content="Hi there! I’m Aba from Adobha Co-living. Are you an existing user or a new user?")]
 if "preferences" not in st.session_state:
-    st.session_state["preferences"] = {}
+    st.session_state["preferences"] = {
+        "rental_duration": None,
+        "pass_type": None,
+        "preferred_mrt": None,
+        "washroom_preference": None,
+        "occupants": None,
+        "move_in_date": None,
+        "nationality": None,
+        "gender": None,
+        "min_budget": None,
+        "max_budget": None,
+        "amenities": []
+    }
 if "collecting_info" not in st.session_state:
     st.session_state["collecting_info"] = True
 if "pass_type" not in st.session_state:
@@ -49,6 +64,16 @@ if "nationality" not in st.session_state:
     st.session_state["nationality"] = None
 if "gender" not in st.session_state:
     st.session_state["gender"] = None
+if "user_type" not in st.session_state:
+    st.session_state["user_type"] = None
+if "existing_user_info" not in st.session_state:
+    st.session_state["existing_user_info"] = {
+        "address": None,
+        "room_number": None,
+        "problem": None
+    }
+if "last_room_results" not in st.session_state:
+    st.session_state["last_room_results"] = []
 
 # Database setup
 @st.cache_resource
@@ -86,124 +111,128 @@ def clean_response(response: str) -> str:
     response = re.sub(r"```$", "", response)
     return response.strip()
 
-def fallback_mrt(chat_history: list, extracted: dict) -> dict:
-    """If 'preferred_mrt' is null, scan the chat history for MRT mentions and update it."""
-    if extracted.get("preferred_mrt") is None:
-        for msg in reversed(chat_history):
-            if hasattr(msg, "content"):
-                text = msg.content.lower()
-                if "east west" in text:
-                    extracted["preferred_mrt"] = "East West Line"
-                    break
-                elif "simei" in text:
-                    extracted["preferred_mrt"] = "Simei MRT"
-                    break
-    return extracted
 
-# --- Extraction of Preferences ---
-def extract_preferences(chat_history):
-    """Extract preferences from chat history."""
-    chat_history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history])
-
+def classify_user_type(chat_history, user_query):
     template = """
-You are an assistant that extracts user preferences from a conversation. Extract the following fields exactly as provided:
-
-- move_in_date: The user's preferred move-in date (e.g., "May 1st").
-- rental_duration: The duration of the rental (e.g., "1 year").
-- occupants: The number of occupants (e.g., "1").
-- preferred_mrt: The user's preferred MRT line (e.g., "Simei MRT"). If the MRT line is mentioned anywhere in the conversation (even if not explicitly labeled), extract it. If multiple MRT lines are mentioned, use the most recent valid one provided.
-- pass_type: The user's pass type (e.g., "EP", "S Pass", "Work Permit").
-- work_study_location: The user's work or study location (e.g., "CBD", "NUS").
-- nationality: The user's nationality (e.g., "Singaporean", "American").
-- gender: The user's gender (e.g., "male", "female", "other").
-
-If a field is not mentioned or cannot be determined, set its value to null.
-
-Return the extracted preferences as a JSON object with the following structure:
-{{
-    "move_in_date": "value or null",
-    "rental_duration": "value or null",
-    "occupants": "value or null",
-    "preferred_mrt": "value or null",
-    "pass_type": "value or null",
-    "work_study_location": "value or null",
-    "nationality": "value or null",
-    "gender": "value or null"
-}}
+You are Aba from Adobha Co-living. Classify the user's response as "existing" or "new".
 
 Conversation History:
 {chat_history}
 
-Extracted Preferences:
-"""
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
-    prompt = ChatPromptTemplate.from_template(template)
-    chain = prompt | llm | StrOutputParser()
+User's Message:
+{user_query}
 
+Response (existing, new, or unclear):
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    chain = prompt | llm | StrOutputParser()
+    response = chain.invoke({"chat_history": chat_history, "user_query": user_query})
+    return response.strip().lower()
+
+
+def extract_existing_user_info(chat_history):
+    template = """
+You are Aba from Adobha Co-living. Extract the following from the conversation history for an existing user:
+- address
+- room_number
+- problem
+
+Conversation History:
+{chat_history}
+
+Extracted Info (return as JSON with null for missing fields):
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    chain = prompt | llm | StrOutputParser()
+    response = chain.invoke({"chat_history": chat_history})
+    cleaned_response = clean_response(response)
+    try:
+        return json.loads(cleaned_response)
+    except json.JSONDecodeError:
+        return {"address": None, "room_number": None, "problem": None}
+    
+
+# --- Extraction of Preferences ---
+def extract_preferences(chat_history):
+    chat_history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history])
+    template = """
+You are Aba from Adobha Co-living. Extract the following preferences for a new user:
+- rental_duration (e.g., "6 months")
+- pass_type (e.g., "EP", "Student", "Work")
+- preferred_mrt (e.g., "Simei MRT"; derive from work location if mentioned)
+- washroom_preference (e.g., "private", "shared")
+- occupants (e.g., "1")
+- move_in_date (e.g., "May 1st")
+- nationality (e.g., "Singaporean")
+- gender (e.g., "male", "female", "other")
+- min_budget (e.g., "1000")
+- max_budget (e.g., "2000")
+- amenities (e.g., ["aircon", "wifi", "gym"])
+
+Conversation History:
+{chat_history}
+
+Extracted Preferences (return as JSON with null for missing fields and empty list for amenities):
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    chain = prompt | llm | StrOutputParser()
     response = chain.invoke({"chat_history": chat_history_str})
     cleaned_response = clean_response(response)
-
     try:
         preferences = json.loads(cleaned_response)
     except json.JSONDecodeError:
-        st.error("Failed to parse LLM response as JSON.")
-        preferences = {}
-
-    preferences = fallback_mrt(chat_history, preferences)
+        preferences = {
+            "rental_duration": None, "pass_type": None, "preferred_mrt": None,
+            "washroom_preference": None, "occupants": None, "move_in_date": None,
+            "nationality": None, "gender": None, "min_budget": None, "max_budget": None,
+            "amenities": []
+        }
+    preferences = fallback_mrt(chat_history, preferences)  # Reuse existing fallback
     return preferences
 
 # --- Dynamic SQL Query Generation using LLM ---
 def get_sql_chain(db):
     template = """
-    You are a data analyst at Adobha Co-living. Based on the database schema provided and the conversation history, generate a valid SQL query that finds properties matching the user's preferences.
-
+You are Aba from Adobha Co-living. Based on the database schema provided and the conversation history, generate a valid, single-line SQL query that finds rooms matching the user's preferences.
+**Crucially, return ONLY the SQL query itself. Do NOT include any additional text, comments, markdown code blocks, or explanations.**
+Do not add any additional text, only the sql query.
 Database Schema:
 {schema}
 
-Conversation History: {chat_history}
+Conversation History:
+{chat_history}
 
-Question: {question}
+Question:
+{question}
 
 **Important Instructions:**
+1. **Date Handling**: Use DATE() for date comparisons. Filter out rooms where eavaildate < move-in date.
+2. **Status Handling**: Only include rooms where rooms.status = 'a' and properties.status = 'a'.
+3. **Room Details**: Include only:
+  - Building name (buildingname from properties)
+  - Nearest MRT (nearestmrt from **properties**, not rooms)
+  - Rent (sellingprice from rooms)
+  - Amenities (aircon, wifi, fridge, washer, dryer, gym, swimming, tenniscourt, squashcourt, microwave as Yes/No)
+  - Available from (eavaildate from rooms)
+  - Washroom details
+4. **Syntactically Correct SQL**: Ensure the query is executable. Do not include explanatory text, comments, or non-SQL content in the query.
+5. **Fuzzy Matching**: Use LIKE for MRT and location matches.
+6. **Amenity Filtering**: If amenities are mentioned, filter rooms where the corresponding columns are 'true'.
+7. **Budget Filtering**: If min_budget and max_budget are provided, filter rooms where sellingprice is within the range.
+8. **Washroom Preference**: If washroom_preference is "private", filter rooms where washroomno = 1 and location = 'Within Room'. If "shared", filter rooms where washroomno > 1 or location != 'Within Room'.
+9. **Follow-Up Questions**: If the user asks about specific room details (e.g., washroom details, amenities) after a room search, generate a query to fetch those details for the previously listed rooms. Use the buildingname, nearestmrt, and sellingprice from the last results to identify the rooms.
+10. **Limit Results**: Limit to 5 rows unless specified otherwise.
 
-1.  **Date Handling:** Always use the `DATE()` function to extract the date part from datetime columns before comparing them with date values. This is crucial for accurate date comparisons.
-2.  **Status Handling:** The room `status` field indicates availability with the value 'a'. Only include rooms where `rooms.status = 'a'`. The properties table `status` field also indicates availability with the value 'a'. Include only rows where `properties.status = 'a'`.
-3.  **Property Details:** When describing properties, include the following details in your query results:
-    * Price (`sellingprice`)
-    * Location (`add1` from properties table)
-    * Availability date (`eavaildate`)
-    * Tenant mix (`ptenanttype`)
-    * Proximity to MRT (`nearestmrt` from rooms table)
-    * Amenities (aircon, wifi, fridge, washer, dryer, gym, swimming, tenniscourt, squashcourt, microwave as Yes or No)
-    * Nearest Supermarket (`nearestsupermarket` from properties table)
-    * Nearest Food Court (`nearestfoodcourt` from properties table)
-    * Nearest Bus Stop (`nearestbusstop` from properties table)
-    * Property Type (`propertytype` from properties table)
-    * Building Name (`buildingname` from properties table)
-    * Washroom Details (washroomno, size, bathtub, location, bidetspray, totalusers, usedrooms from washrooms table, using aggregate functions to combine multiple washrooms into single row)
-4.  **Syntactically Correct SQL:** Ensure the generated SQL query is syntactically correct and executable.
-5.  **No Assumptions:** Do not assume any additional details beyond what is provided in the schema and conversation history.
-6.  **Avoid Redundant Date Checks:** Do not include date checks that compare the current date with past dates, unless explicitly requested by the user.
-7.  **Boolean Formatting:** Display boolean values (aircon, wifi, bathtub, bidetspray, etc.) as 'Yes' or 'No' in the result.
-8.  **Fuzzy Matching:** When the user mentions a location or MRT station, use the `LIKE` operator with wildcards (`%`) to find matching entries. Do not require exact matches.
-9.  **Price Column:** The price of the room is now represented by the `sellingprice` column in the rooms table. Use this column for price related queries.
-10. **Do not use the `published` column in the query.**
-11. **Use the `nearestmrt` column from the rooms table to find the nearest mrt. Do not use the `mrt` column from the properties table.**
-12. **Include washroom details from the washrooms table in the query results. Use aggregate functions like `GROUP_CONCAT()` to combine multiple washrooms into a single row.**
-13. **Data Quality:** The `rooms.status` column contains inconsistent data. For this query, only use rows where `rooms.status` is exactly equal to 'a'. Do not use rows where `rooms.status` is 'i' or an empty string.
-14. **Limit Results:** If the user does not specify a limit, limit the results to a maximum of 5 rows to prevent overwhelming the user.
-15. **Amenity Filtering:** If the user mentions any amenity (aircon, wifi, fridge, washer, dryer, gym, swimming, tenniscourt, squashcourt, microwave) in their query, filter the results to include only rooms where the corresponding column in the `rooms` table is equal to 'true'.
 
-    SQL Query:
-    """
+SQL Query:
+"""
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatOpenAI(model="gpt-4-0125-preview")
-
-    def get_schema(_):
-        return db.get_table_info()
-
     return (
-        RunnablePassthrough.assign(schema=get_schema)
+        RunnablePassthrough.assign(schema=lambda _: db.get_table_info())
         | prompt
         | llm
         | StrOutputParser()
@@ -214,6 +243,8 @@ def clean_sql_query(query: str) -> str:
     query = query.strip()
     query = re.sub(r"^```(?:sql)?\s*", "", query)
     query = re.sub(r"\s*```$", "", query)
+    query = query.replace("sql\n", "")
+    query = query.replace("```sql", "") #Added to remove ```sql
     return query.strip()
 
 def validate_sql_syntax(sql_query: str) -> bool:
@@ -228,53 +259,80 @@ def validate_sql_syntax(sql_query: str) -> bool:
 def generate_query_from_preferences(chat_history: list, user_question: str):
     # Use the dynamic SQL chain that takes schema, conversation history, and latest question
     sql_chain = get_sql_chain(db)
+
     # Combine conversation history into one string
     chat_history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history])
+
+    # Get user preferences from session state
+    preferences = st.session_state["preferences"]
+
+    # Construct the prompt
+    prompt = f"""
+    You are a SQL query generator. Generate a SQL query to retrieve rooms based on user preferences.
+
+    User Preferences:
+    {preferences}
+
+    Generate a SQL query to retrieve rooms that match the user's preferences, including amenity columns (aircon, wifi, fridge, washer, dryer, gym, swimming, tenniscourt, squashcourt, microwave).
+    Map the number of occupants to maxoccupancy. Filter by washroom preferences, preferred mrt, budget range.
+    Filter for active rooms and properties (r.status = 'a' and p.status = 'a').
+    Order the results by sellingprice in ascending order.
+    Limit the results to the top 5.
+
+    **Crucially, include the 'totalusers' and 'location' columns from the 'washrooms' table to describe the washroom details in the response.
+    Specifically, indicate if the washroom is 'private' (totalusers = 1) or 'shared' (totalusers > 1), and provide the 'location' of the washroom.**
+
+    Conversation History:
+    {chat_history_str}
+
+    User's Question:
+    {user_question}
+
+    Generate the SQL query:
+    """
+
     response = sql_chain.invoke({
         "chat_history": chat_history_str,
-        "question": user_question
+        "question": prompt  # Pass the constructed prompt
     })
+
     # Strip and clean the response
     raw_query = response.strip()
     sql_query = clean_sql_query(raw_query)
     return sql_query
 
 
+import pandas as pd
+from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError # Import SQLAlchemyError
+
+# Assuming 'engine' is already defined elsewhere (e.g., create_engine('mysql+mysqlconnector://user:password@host/database'))
+
 def execute_query(query: str):
     try:
-        # Create a direct connection
         connection = engine.raw_connection()
         try:
-            # Create a cursor
             cursor = connection.cursor()
             try:
-                # Execute the query
+                print(f"Executing Query: {query}") #Debug print.
                 cursor.execute(query)
-                # Fetch all results
                 columns = [col[0] for col in cursor.description]
                 rows = cursor.fetchall()
-                # Create a DataFrame from the results
                 df = pd.DataFrame(rows, columns=columns)
-                
                 if df.empty:
                     return {"status": "no_matches", "message": "I couldn't find any properties matching your preferences. Want to tweak them a bit?"}
                 return {"status": "success", "data": df.to_dict(orient="records")}
             finally:
-                # Close the cursor
                 cursor.close()
         finally:
-            # Close the connection
             connection.close()
     except Exception as e:
         return {"status": "error", "message": f"Oops, something went wrong with the query: {e}"}
 
-
 # --- Response Chains for Final Answer ---
 def get_property_info_chain():
     template = """
-    You are Justine from Adobha Co-living, here to assist in a friendly and respectful way.
-
-The user is looking for available **rooms** for rent, and here’s what I found:
+You are Aba from Adobha Co-living. Present room details:
 
 <RESULTS>
 {results}
@@ -286,57 +344,25 @@ Conversation History:
 User’s latest query:
 {question}
 
-Please share a helpful and detailed response with the **room** details, keeping it clear and concise. 
-Highlight key features or amenities of the **rooms** that match the user's previously stated preferences, if possible.
-Use bullet points or numbered lists for clarity.
-If there are no matching **rooms**, inform the user and suggest alternative options.
-If there are multiple options, list the **rooms** briefly.
-Do not mention the <RESULTS> tags in your response.
+List rooms with:
+- Building name
+- Nearest MRT
+- Rent
+- Amenities (list as bullet points, e.g., - Aircon: Yes)
+- Available from
+Use bullet points for each room. Ask if they want to schedule a viewing.
+If no matches, say: "I couldn’t find any rooms matching your preferences. Want to tweak them?"
+Do not mention the <RESULTS> tags.
 
-**Room Details:**
-Please provide a summary of the room, including the location, price, availability date, tenant mix, and key amenities (e.g., air conditioning, proximity to MRT).
-
-**Washroom Details:**
-The washroom details are provided in the "WashroomDetails" column of the provided data.
-Each entry represents a washroom and is formatted as follows:
-"washroomno|size|bathtub|location|bidetspray|totalusers|usedrooms"
-Multiple washrooms are separated by "; ".
-Please parse these details and present them in a clear, readable format, reporting the details exactly as they appear.
-Do not add any extra information or invent any details that are not present in the "WashroomDetails" column.
-Keep the washroom details concise and focus on the most relevant information.
-
-Example:
-Input: "Juniorbath|Standard|No|Within Room|No|1|80; MasterBath|Large|No|Within Room|No|1|79"
-Output:
-- Juniorbath:
-    - Size: Standard
-    - Bathtub: No
-    - Location: Within Room
-    - Bidet Spray: No
-    - Total Users: 1
-    - Used Rooms: 80
-- MasterBath:
-    - Size: Large
-    - Bathtub: No
-    - Location: Within Room
-    - Bidet Spray: No
-    - Total Users: 1
-    - Used Rooms: 79
-
-If the "WashroomDetails" column is empty or null, state "No washroom details available."
-
-Ask the user if they would like to schedule a viewing of any of the **rooms** or if they have any further questions.
-
-Justine’s response:
+Aba’s response:
 """
-    
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatOpenAI(model="gpt-4-0125-preview")
     return prompt | llm | StrOutputParser()
 
 def collect_customer_info():
     template = """
-You are Justine from Adobha Co-living, assisting in a friendly and respectful manner.
+You are Aba from Adobha Co-living, assisting in a friendly and respectful manner.
 
 I need to collect these details:
 - Move-in date
@@ -359,7 +385,77 @@ User’s latest query:
 
 If the user is giving info, thank them and note it. If anything is missing, ask for it politely. If all details are collected, say: "Thank you! I’ve got everything I need. Let me find some great options for you!"
 
-Justine’s response:
+Aba’s response:
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    return (
+        RunnablePassthrough.assign(preferences=lambda _: st.session_state.get("preferences", {}))
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+def collect_existing_user_info_chain():
+    template = """
+You are Aba from Adobha Co-living. Collect the following from an existing user:
+- Address
+- Room number
+- Problem
+
+Current info:
+{info}
+
+Conversation History:
+{chat_history}
+
+User’s latest query:
+{question}
+
+If the user provides info, thank them and ask for the next missing piece of information.
+If all info is collected, say: "Thank you! I’ve got everything I need. How can I assist with your problem?"
+If the user asks a question or goes off-topic, address it briefly and then ask for the next missing piece.
+
+Aba’s response:
+"""
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    return (
+        RunnablePassthrough.assign(info=lambda _: st.session_state.get("existing_user_info", {}))
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+def collect_new_user_info_chain():
+    template = """
+You are Aba from Adobha Co-living. Collect the following from a new user:
+- Rental duration (must be at least 3 months)
+- Pass type (EP, Student, Work)
+- Preferred MRT
+- Washroom preference (private or shared)
+- Number of occupants
+- Move-in date
+- Nationality
+- Gender
+- Budget range (min and max)
+- Amenities (e.g., aircon, wifi, gym)
+
+Current preferences:
+{preferences}
+
+Conversation History:
+{chat_history}
+
+User’s latest query:
+{question}
+
+If the user provides info, thank them and ask for the next missing piece of information.
+If rental duration is less than 3 months, say: "We require a minimum rental duration of 3 months. Please provide a duration of at least 3 months."
+If all info is collected, say: "Thank you! I’ve got everything I need. Let me find some great options for you!"
+If the user asks a question or goes off-topic, address it briefly and then ask for the next missing piece.
+
+Aba’s response:
 """
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatOpenAI(model="gpt-4-0125-preview")
@@ -380,7 +476,12 @@ def generate_llm_response(chat_history, user_query, prompt_template):
 
 def classify_intent(chat_history, user_query):
     template = """
-Classify the intent of the user's message.
+Classify the intent of the user's message. Return only one of the following options exactly: 
+- general
+- information_request
+- property_search
+- viewing_request
+- error
 
 Conversation History:
 {chat_history}
@@ -388,7 +489,7 @@ Conversation History:
 User's Message:
 {user_query}
 
-Intent (general, information_request, property_search, viewing_request, etc.):
+Intent:
 """
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatOpenAI(model="gpt-4-0125-preview")
@@ -400,86 +501,56 @@ def all_info_collected(preferences):
     return all(field in preferences and preferences[field] for field in required_fields)
 
 # --- Main Response Function ---
+import logging
+import streamlit as st
+from langchain_core.messages import HumanMessage
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 def get_response(user_query: str, chat_history: list):
     new_history = chat_history + [HumanMessage(content=user_query)]
+    
+    # Initialize flag if not already set
+    if "viewing_possible" not in st.session_state:
+        st.session_state["viewing_possible"] = True  # Changed to True so viewing can be scheduled
 
-    intent_sequence = classify_intent(chat_history, user_query)
+    # Step 1: Determine user type if not set
+    if st.session_state["user_type"] is None:
+        logger.info(f"Determining user type for query: {user_query}")
+        user_type = classify_user_type(chat_history, user_query)
+        logger.info(f"Classified user type: {user_type}")
+        if user_type == "existing":
+            st.session_state["user_type"] = "existing"
+            return "Thank you! Let's start by getting your address."
+        elif user_type == "new":
+            st.session_state["user_type"] = "new"
+            return "Great! Let's find you a room. How long are you planning to rent?"
+        else:
+            return "I'm not sure if you're an existing or new user. Could you please clarify?"
+
+    # Step 4: Check for viewing request FIRST before other handling
+    # This is the key fix - we need to check for viewing request before other processing
+    intent_chain = classify_intent(new_history, user_query)
     try:
-        intent = intent_sequence.invoke({"chat_history": chat_history, "user_query": user_query})
-    except Exception as e:
-        return "Sorry, I encountered an error. Please try again."
-
-    intent = intent.lower()
-
-    if "general" in intent or "casual_conversation" in intent:
-        casual_prompt = """
-You are Justine from Adobha Co-living, having a casual conversation with the user. Respond appropriately, maintaining a natural and friendly conversational flow.
-
-If the user expresses gratitude, acknowledges your assistance, apologizes, or makes a similar conversational turn, respond appropriately and then seamlessly continue the conversation or ask how you can further assist them.
-
-Conversation History:
-{chat_history}
-
-User's Message:
-{user_query}
-
-Your Response:
-"""
-        response = generate_llm_response(new_history, user_query, casual_prompt)
-        return response
-
-    elif "property_search" in intent:
-        property_prompt = """
-You are Justine from Adobha Co-living, assisting a customer with a property search. Respond appropriately.
-
-Conversation History:
-{chat_history}
-
-User's Message:
-{user_query}
-
-Your Response:
-"""
-        new_preferences = extract_preferences(new_history)
-        st.session_state["preferences"] = {**st.session_state.get("preferences", {}), **new_preferences}
-        save_preferences_to_file(st.session_state["preferences"])
-        current_preferences = st.session_state["preferences"]
-
-        if not all_info_collected(current_preferences):
-            st.session_state["collecting_info"] = True
-            chain = collect_customer_info()
-            response = chain.invoke({"question": user_query, "chat_history": chat_history})
-            return response
-
-        st.session_state["collecting_info"] = False
-
-        try:
-            sql_query = generate_query_from_preferences(new_history, user_query)
-            results = execute_query(sql_query)
-
-            if results["status"] == "success":
-                chain = get_property_info_chain()
-                response = chain.invoke({
-                    "results": results["data"],
-                    "chat_history": chat_history,
-                    "question": user_query
-                })
-                return response
-            elif results["status"] == "no_matches":
-                return results["message"]
-            else:
-                return results["message"]
-
-        except Exception as e:
-            return "An error occurred while processing your request."
-
-    elif "viewing_request" in intent:
-        viewing_prompt = """
-You are Justine from Adobha Co-living. The user has requested a viewing. Respond appropriately by:
+        intent = intent_chain.invoke({"chat_history": new_history, "user_query": user_query})
+        intent = intent.lower().strip()
+        logger.info(f"Classified intent: {intent}")
+        
+        if intent == "viewing_request":
+            viewing_prompt = """
+You are Aba from Adobha Co-living. The user has requested a viewing. Respond appropriately by:
 
 1. **Confirming Availability:**
+    - Ask the user for their full name and phone number.
+    - Validate the phone number to ensure it is a valid Singaporean number:
+        - It should start with `+65` or `65`.
+        - It should be followed by 8 digits (e.g., `+65 9123 4567` or `6591234567`).
+    - If the phone number is invalid, politely ask the user to provide a valid Singaporean number.
     - Ask the user to specify their preferred date and time for the viewing.
     - If they have already provided a date and time, confirm that you have recorded it.
+    - Once they provide the full details, display them for verification.
 
 2. **Providing Room Address:**
     - Provide the complete address of the room they wish to view.
@@ -499,12 +570,72 @@ User's Message:
 
 Your Response:
 """
-        response = generate_llm_response(new_history, user_query, viewing_prompt)
+            response = generate_llm_response(new_history, user_query, viewing_prompt)
+            return response
+    except Exception as e:
+        logger.error(f"Error classifying intent: {e}")
+        # Continue with normal flow if intent classification fails
+
+    # Step 2: Handle existing users
+    if st.session_state["user_type"] == "existing":
+        extracted_info = extract_existing_user_info(new_history)
+        st.session_state["existing_user_info"].update(extracted_info)
+        logger.info(f"Extracted existing user info: {st.session_state['existing_user_info']}")
+        
+        # Check if all info is collected
+        if all(st.session_state["existing_user_info"].values()):
+            return "Thank you! I've got everything I need. How can I assist with your problem?"
+        
+        # Ask for next missing piece
+        chain = collect_existing_user_info_chain()
+        response = chain.invoke({"question": user_query, "chat_history": chat_history})
+        logger.info(f"Response for existing user: {response}")
         return response
 
-    elif "information_request" in intent:
-        info_prompt = """
-You are Justine from Adobha Co-living. The user has requested information. Respond appropriately.
+    # Step 3: Handle new users (property search)
+    if st.session_state["user_type"] == "new":
+        # Extract preferences from chat history
+        extracted_preferences = extract_preferences(new_history)
+        st.session_state["preferences"].update(extracted_preferences)
+
+        # Validate rental duration
+        rental_duration = st.session_state["preferences"].get("rental_duration", "")
+        if rental_duration and "month" in rental_duration.lower():
+            try:
+                months = int(rental_duration.split()[0])
+                if months < 3:
+                    st.session_state["preferences"]["rental_duration"] = None
+                    return "We require a minimum rental duration of 3 months. Please provide a duration of at least 3 months."
+            except ValueError:
+                pass
+
+        # Check if all preferences are collected for property search
+        required_fields = ["rental_duration", "pass_type", "preferred_mrt", "washroom_preference",
+                           "occupants", "move_in_date", "nationality", "gender", "min_budget", "max_budget"]
+        if all(st.session_state["preferences"].get(field) for field in required_fields):
+            sql_query = generate_query_from_preferences(new_history, user_query)
+            results = execute_query(sql_query)
+            if results["status"] == "success":
+                # Store the results for later reference
+                st.session_state["last_room_results"] = results["data"]
+                chain = get_property_info_chain()
+                return chain.invoke({"results": results["data"], "chat_history": chat_history, "question": user_query})
+            elif results["status"] == "no_matches":
+                return results["message"]
+            else:
+                return results["message"]
+
+        # Ask for next missing piece for property search
+        chain = collect_new_user_info_chain()
+        return chain.invoke({"question": user_query, "chat_history": chat_history})
+
+    # Handle other intents if not caught earlier
+    try:
+        if intent == "general" or intent == "casual_conversation":
+            casual_prompt = """
+You are Aba from Adobha Co-living, having a casual conversation with the user. Respond appropriately, maintaining a natural and friendly conversational flow.
+
+If the user expresses gratitude, acknowledges your assistance, apologizes, or makes a similar conversational turn, respond appropriately and then seamlessly continue the conversation or ask how you can further assist them.
 
 Conversation History:
 {chat_history}
@@ -514,14 +645,32 @@ User's Message:
 
 Your Response:
 """
-        response = generate_llm_response(new_history, user_query, info_prompt)
-        return response
+            response = generate_llm_response(new_history, user_query, casual_prompt)
+            return response
 
-    elif "error" in intent:
-        return "Sorry, I encountered an error while processing your request. Please try again or rephrase your query."
+        elif intent == "information_request":
+            info_prompt = """
+You are Aba from Adobha Co-living. The user has requested information. Respond appropriately.
 
-    else:
-        return "I'm not sure how to respond to that. Could you please clarify?"
+Conversation History:
+{chat_history}
+
+User's Message:
+{user_query}
+
+Your Response:
+"""
+            response = generate_llm_response(new_history, user_query, info_prompt)
+            return response
+
+        elif intent == "error":
+            return "Sorry, I encountered an error while processing your request. Please try again or rephrase your query."
+    except:
+        pass
+
+    # Default response if all else fails
+    return "I'm not sure how to respond to that. Could you please clarify?"
+
 # --- UI Setup ---
 st.title("GenZI Care Chat Bot")
 
@@ -532,10 +681,18 @@ with st.sidebar:
     st.write("• We provide a variety of fully furnished rooms with flexible lease terms and all-inclusive pricing.")
     st.subheader("Developed by GenZI care")
     if st.button("Reset Chat"):
-        st.session_state["chat_history"] = [AIMessage(content="Hi there! I’m Justine from Adobha Co-living. How can I assist you today?")]
-        st.session_state["preferences"] = {}
+        st.session_state["chat_history"] = [AIMessage(content="Hi there! I’m Aba from Adobha Co-living. Are you an existing user or a new user?")]
+        st.session_state["preferences"] = {
+    "rental_duration": None, "pass_type": None, "preferred_mrt": None,
+    "washroom_preference": None, "occupants": None, "move_in_date": None,
+    "nationality": None, "gender": None, "min_budget": None, "max_budget": None,
+    "amenities": []
+}
         st.session_state["collecting_info"] = False
+        st.session_state["user_type"] = None
+        st.session_state["existing_user_info"] = {"address": None, "room_number": None, "problem": None}
         st.rerun()
+    
 
 # --- Chat UI ---
 for message in st.session_state["chat_history"]:
