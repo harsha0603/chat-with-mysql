@@ -111,6 +111,20 @@ def clean_response(response: str) -> str:
     response = re.sub(r"```$", "", response)
     return response.strip()
 
+def fallback_mrt(chat_history: list, extracted: dict) -> dict:
+    """If 'preferred_mrt' is null, scan the chat history for MRT mentions and update it."""
+    if extracted.get("preferred_mrt") is None:
+        for msg in reversed(chat_history):
+            if hasattr(msg, "content"):
+                text = msg.content.lower()
+                if "east west" in text:
+                    extracted["preferred_mrt"] = "East West Line"
+                    break
+                elif "simei" in text:
+                    extracted["preferred_mrt"] = "Simei MRT"
+                    break
+    return extracted
+
 
 def classify_user_type(chat_history, user_query):
     template = """
@@ -225,7 +239,7 @@ Question:
 8. **Washroom Preference**: If washroom_preference is "private", filter rooms where washroomno = 1 and location = 'Within Room'. If "shared", filter rooms where washroomno > 1 or location != 'Within Room'.
 9. **Follow-Up Questions**: If the user asks about specific room details (e.g., washroom details, amenities) after a room search, generate a query to fetch those details for the previously listed rooms. Use the buildingname, nearestmrt, and sellingprice from the last results to identify the rooms.
 10. **Limit Results**: Limit to 5 rows unless specified otherwise.
-
+11. **Aggregation for Non-Grouped Columns**: When using GROUP BY (e.g., on rooms.roomid), apply aggregate functions (e.g., MAX() or MIN()) to all non-grouped columns in the SELECT list (e.g., MAX(p.buildingname), MAX(p.nearestmrt), MAX(r.sellingprice)) to comply with SQL modes like ONLY_FULL_GROUP_BY.
 
 SQL Query:
 """
@@ -670,8 +684,6 @@ Your Response:
 
     # Default response if all else fails
     return "I'm not sure how to respond to that. Could you please clarify?"
-
-
 
 
 # Custom CSS with fixed sidebar visibility
