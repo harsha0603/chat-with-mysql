@@ -671,9 +671,90 @@ Your Response:
     # Default response if all else fails
     return "I'm not sure how to respond to that. Could you please clarify?"
 
+
+
+
+# Custom CSS with fixed sidebar visibility
+custom_css = """
+<style>
+    /* Set the background color of the entire app to white */
+    .stApp {
+        background-color: #FFFFFF;  /* Pure White */
+    }
+
+    /* Set the text color to black for better readability in main window */
+    .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6, 
+    .stApp p, .stApp div, .stApp span {
+        color: #2D2D2D;  /* Dark Gray for better contrast */
+    }
+
+    /* Style the sidebar with a blue background */
+    [data-testid="stSidebar"] {
+        background-color: #4A90E2;  /* Professional Medium Blue */
+    }
+
+    /* Set the sidebar text color to white for high visibility */
+    [data-testid="stSidebar"] h1, 
+    [data-testid="stSidebar"] h2, 
+    [data-testid="stSidebar"] h3, 
+    [data-testid="stSidebar"] h4, 
+    [data-testid="stSidebar"] h5, 
+    [data-testid="stSidebar"] h6, 
+    [data-testid="stSidebar"] p, 
+    [data-testid="stSidebar"] div, 
+    [data-testid="stSidebar"] span {
+        color: #FFFFFF !important;  /* White for maximum contrast, with !important to override defaults */
+    }
+
+    /* Style the reset button */
+    .stButton button {
+        background-color: #FF6B6B;  /* Vibrant Red for contrast */
+        color: #FFFFFF;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 8px;
+        transition: background-color 0.3s ease;
+    }
+    
+    .stButton button:hover {
+        background-color: #E55A5A;  /* Darker Red on hover */
+    }
+
+    /* Style the chat input box */
+    .stChatInput input {
+        background-color: #F8F9FA;  /* Very Light Gray */
+        color: #2D2D2D;
+        border: 1px solid #D1D9E6;
+        border-radius: 8px;
+        padding: 10px;
+    }
+
+    /* Style chat messages */
+    .stChatMessage {
+        border-radius: 10px;
+        padding: 10px;
+        margin: 5px 0;
+    }
+
+    /* AI message styling */
+    [data-testid="stChatMessage"][data-testid="AI"] {
+        background-color: #F0F4FF;  /* Very Light Blue for AI messages */
+    }
+
+    /* Human message styling */
+    [data-testid="stChatMessage"][data-testid="Human"] {
+        background-color: #F8F9FA;  /* Very Light Gray for human messages */
+    }
+</style>
+"""
+
+# Inject the custom CSS into the app
+st.markdown(custom_css, unsafe_allow_html=True)
+
 # --- UI Setup ---
 st.title("GenZI Care Chat Bot")
 
+# --- Sidebar ---
 with st.sidebar:
     st.subheader("About Adobha Co-living")
     st.write("Singapore’s pioneer in co-living since 2013.")
@@ -683,16 +764,15 @@ with st.sidebar:
     if st.button("Reset Chat"):
         st.session_state["chat_history"] = [AIMessage(content="Hi there! I’m Aba from Adobha Co-living. Are you an existing user or a new user?")]
         st.session_state["preferences"] = {
-    "rental_duration": None, "pass_type": None, "preferred_mrt": None,
-    "washroom_preference": None, "occupants": None, "move_in_date": None,
-    "nationality": None, "gender": None, "min_budget": None, "max_budget": None,
-    "amenities": []
-}
+            "rental_duration": None, "pass_type": None, "preferred_mrt": None,
+            "washroom_preference": None, "occupants": None, "move_in_date": None,
+            "nationality": None, "gender": None, "min_budget": None, "max_budget": None,
+            "amenities": []
+        }
         st.session_state["collecting_info"] = False
         st.session_state["user_type"] = None
         st.session_state["existing_user_info"] = {"address": None, "room_number": None, "problem": None}
         st.rerun()
-    
 
 # --- Chat UI ---
 for message in st.session_state["chat_history"]:
@@ -703,6 +783,7 @@ for message in st.session_state["chat_history"]:
         with st.chat_message("Human", avatar="👤"):
             st.markdown(message.content)
 
+# --- Chat Input ---
 user_query = st.chat_input("Drop your message here...")
 if user_query and user_query.strip():
     st.session_state["chat_history"].append(HumanMessage(content=user_query))
