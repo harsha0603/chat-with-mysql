@@ -802,9 +802,8 @@ def get_response(user_query: str, chat_history: list):
         st.session_state["existing_user_info"].update(extracted_info)
         missing = [k for k, v in st.session_state["existing_user_info"].items() if v is None]
         if not missing:
-            return "Thanks! I've got all I need—how can I help with your problem?"
-        return f"Gotcha! What's your {missing[0]}?"
-
+            return "Thank you! I've received everything we need and will get back to you soon. Apologies for any inconvenience."
+        return f"Got it! What's your {missing[0]}?"
     elif st.session_state["user_type"] == "new":
         # Validate rental duration
         rental_duration = st.session_state["preferences"].get("rental_duration")
@@ -813,7 +812,7 @@ def get_response(user_query: str, chat_history: list):
                 months = int(rental_duration.split()[0])
                 if months < 3:
                     st.session_state["preferences"]["rental_duration"] = None
-                    return "We need at least 3 months—could you update your rental duration?"
+                    return "Could you kindly update your rental duration to a minimum of three months? We appreciate your understanding."
             except ValueError:
                 pass
 
