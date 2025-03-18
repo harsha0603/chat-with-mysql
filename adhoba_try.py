@@ -304,32 +304,6 @@ def extract_preferences(chat_history):
     preferences.update({k: v for k, v in manual_extracted.items() if v is not None})
     return preferences
 
-mrt_dictionary = {
-    "Upper Changi East": "Upper Changi East (DT)",
-    "Upper Changi": "Upper Changi (DT)",
-    "Kembangan": "Kembangan (EW)",
-    "Simei": "Simei (EW)",
-    "Novena": "Novena (NS)",
-    "Yio Chu Kang": "Yio Chu Kang (NS)",
-    "Lentor": "Lentor (TE)",
-    "Chinese Garden": "Chinese Garden (EW)",
-    "Eunos": "Eunos (EW)",
-    "Cashew": "Cashew (DT)",
-    "Mountbatten": "Mountbatten (CC)",
-    "Boon Keng": "Boon Keng (NE)",
-    "Clementi": "Clementi (EW)",
-    "Orchard": "Orchard (NS)",
-    "Paya Lebar": "Paya Lebar (EW-CC)",
-    "Pasir Ris": "Pasir Ris (EW)",
-    "Holland Village": "Holland Village (CC)",
-    "Yew Tee": "Yew Tee (NS)",
-    "Lakeside": "Lakeside (EW)",
-    "Woodleigh": "Woodleigh (NE)",
-    "Hume": "Hume (DT)",
-    "Admiralty": "Admiralty (NS)",
-    "Nicoll Highway": "Nicoll Highway (CC)",
-    "Bugis": "Bugis (EW-DT)"
-}
 
 # --- Dynamic SQL Query Generation using LLM ---
 def get_sql_chain(db):
@@ -346,11 +320,6 @@ You are Aba from Adobha Co-living. Based on the database schema, conversation hi
 ## **User Question:**  
 {question}  
 
-## **MRT Station Dictionary:**  
-{mrt_dictionary}  
-- Use the exact station name from this dictionary when the user mentions an MRT station. Map the user’s input to the closest matching key and use its value (e.g., if user says "Cashew", use "Cashew (DT)" if that’s the value).  
-
----
 
 ## **Instructions:**  
 
@@ -367,30 +336,28 @@ You are Aba from Adobha Co-living. Based on the database schema, conversation hi
 
 ### **3. User Preference Filters**  
 Apply these when mentioned:  
-- **Nearest MRT**: Use the exact value from the MRT dictionary (e.g., `properties.nearestmrt = 'Cashew (DT)'`). Do NOT modify or use wildcards.  
+- **Nearest MRT**: Use `properties.nearestmrt LIKE '%mrt%'` to allow partial matches. (Fuzzy Matching)
 - **Budget**: Filter `rooms.sellingprice` with `BETWEEN min_budget AND max_budget`.  
-- **Max Occupancy**: Filter `rooms.maxoccupancy = value`.  
+- **Max Occupancy**:  
+  - Ensure `rooms.maxoccupancy` accounts for variations like `'1 Pax'`, `'Single'`, `'Couple'`, etc.  
+  - Use: `rooms.maxoccupancy = '1 Pax' OR rooms.maxoccupancy LIKE '%Single%'`.  (For single occupancy)
+  - Use `rooms.maxoccupancy = '2 Pax' OR rooms.maxoccupancy LIJE '%Couple%' . (For 2 occupancy)
 - **Washroom Preferences**: See below.  
 - **Amenities**: Filter `rooms.[amenity] = 'true'` for each mentioned amenity.  
 
 ### **4. Washroom Preferences**  
-- **"Private"**: `washroomno = 1 AND washrooms.location = 'Within Room'`.  
-- **"Shared"**: `washroomno > 1 OR washrooms.location != 'Within Room'`.  
+- **"Private"**: `washrooms.location = 'Within Room'`.  
+- **"Shared"**: `washrooms.location != 'Within Room'`.  
 - **Total Users**: Use `COALESCE(washrooms.totalusers, 0) <= X` in the `LEFT JOIN ON` clause.  
 
 ### **5. Query Structure**  
-- **Joins**: Use `JOIN properties ON rooms.propertyid = properties.propertyid` and `LEFT JOIN washrooms ON rooms.roomid = washrooms.roomid`.  
+- **Joins**: Use `JOIN properties ON rooms.propertyid = properties.propertyid` and `LEFT JOIN washrooms ON properties.propertyid = washrooms.propertyid`.  
 - **Grouping**: Always `GROUP BY rooms.roomid`.  
 - **Aggregation**: Apply `MAX()` to ALL non-grouped columns.  
 - **LEFT JOIN Filters**: Place conditions in the `ON` clause with `COALESCE()`.  
 
 ### **6. Result Limit**  
 - Default to `LIMIT 5` unless specified otherwise.  
-
-### **7. Edge Cases**  
-- If no preferences are given, return all available rooms (per status rules).  
-- If the user’s MRT input doesn’t match a dictionary key, use the closest reasonable match or skip the filter.  
-
 ---
 
 **SQL Query:**  
@@ -399,8 +366,7 @@ Apply these when mentioned:
     llm = ChatOpenAI(model="gpt-4o-mini")
     return (
         RunnablePassthrough.assign(
-            schema=lambda _: db.get_table_info(),
-            mrt_dictionary=lambda _: mrt_dictionary  # Add mrt_dictionary here
+            schema=lambda _: db.get_table_info()
         )
         | prompt
         | llm
@@ -526,6 +492,7 @@ You are Aba from Adobha Co-living. Collect the following from an existing user:
 - Address
 - Room number
 - Problem
+- Name and Number 
 
 Current info:
 {info}
@@ -759,16 +726,26 @@ def get_response(user_query: str, chat_history: list):
     intent_chain = classify_intent(new_history, user_query)
     intent = intent_chain.invoke({"chat_history": new_history, "user_query": user_query}).strip().lower()
 
-    # Step 4: Handle intents
     if intent == "viewing_request":
         viewing_prompt = """
-        You are Aba from Adobha Co-living. Handle a viewing request:
-        - Ask for full name, phone number (+65 or 65 followed by 8 digits), date/time.
-        - Provide room address, arrival instructions, and gratitude.
-        History: {chat_history}
-        Query: {user_query}
-        """
-        return generate_llm_response(new_history, user_query, viewing_prompt)
+    You are Aba from Adobha Co-living. Handle a viewing request naturally and stay focused on completing it:
+    - If the user hasn’t provided any viewing details yet (full name, phone number, date/time), ask: "Could you please provide your full name, phone number (must be a valid Singapore number: +65 or 65 followed by exactly 8 digits, e.g., +6591234567), and your preferred date/time for the viewing?"
+    - If the user provides some or all details in the current query or history, extract them (full name, phone number, date/time). Then:
+      - Validate the phone number: it must start with +65 or 65 and have exactly 8 digits. If invalid (e.g., wrong format, too many/few digits), say: "Hmm, that doesn’t look like a valid Singapore number. Could you provide one that starts with +65 or 65 followed by 8 digits, like +6591234567?" and stop there.
+      - If the phone number is valid but other details are missing, acknowledge what’s provided and ask for the rest (e.g., "Thanks, [name]! I’ve got your number [phone]. Could you let me know your preferred date/time?").
+      - If all details are provided and the phone number is valid, confirm: "Here’s what I’ve got: [name], [phone number], [date/time]. Your viewing is scheduled at [property address from preferences, or '123 Adobha Lane, Singapore' if none specified]. When you get there, just let me know you’ve arrived!" and do not list properties again.
+    - Use the chat history and current query to determine what’s already been provided—don’t restart the process unnecessarily.
+    - Keep the tone friendly and conversational, and focus on completing the viewing request without reverting to property listings.
+    History: {chat_history}
+    Query: {user_query}
+    Preferences: {preferences}
+    """
+        return generate_llm_response(
+            new_history,
+            user_query,
+            viewing_prompt,
+            preferences=st.session_state["preferences"]
+        )
     
     elif intent == "information_request" and st.session_state.get("last_room_results"):
         info_prompt = """
