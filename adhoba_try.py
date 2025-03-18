@@ -154,7 +154,7 @@ User's Message:
 Response (existing, new, or unclear):
 """
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     chain = prompt | llm | StrOutputParser()
     response = chain.invoke({"chat_history": chat_history, "user_query": user_query})
     return response.strip().lower()
@@ -173,7 +173,7 @@ Conversation History:
 Extracted Info (return as JSON with null for missing fields):
 """
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     chain = prompt | llm | StrOutputParser()
     response = chain.invoke({"chat_history": chat_history})
     cleaned_response = clean_response(response)
@@ -290,7 +290,7 @@ def extract_preferences(chat_history):
 
     Extracted Preferences:
     """
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     response = llm.invoke(template)
     cleaned_response = clean_response(response.content)
     try:
@@ -304,12 +304,38 @@ def extract_preferences(chat_history):
     preferences.update({k: v for k, v in manual_extracted.items() if v is not None})
     return preferences
 
+mrt_dictionary = {
+    "Upper Changi East": "Upper Changi East (DT)",
+    "Upper Changi": "Upper Changi (DT)",
+    "Kembangan": "Kembangan (EW)",
+    "Simei": "Simei (EW)",
+    "Novena": "Novena (NS)",
+    "Yio Chu Kang": "Yio Chu Kang (NS)",
+    "Lentor": "Lentor (TE)",
+    "Chinese Garden": "Chinese Garden (EW)",
+    "Eunos": "Eunos (EW)",
+    "Cashew": "Cashew (DT)",
+    "Mountbatten": "Mountbatten (CC)",
+    "Boon Keng": "Boon Keng (NE)",
+    "Clementi": "Clementi (EW)",
+    "Orchard": "Orchard (NS)",
+    "Paya Lebar": "Paya Lebar (EW-CC)",
+    "Pasir Ris": "Pasir Ris (EW)",
+    "Holland Village": "Holland Village (CC)",
+    "Yew Tee": "Yew Tee (NS)",
+    "Lakeside": "Lakeside (EW)",
+    "Woodleigh": "Woodleigh (NE)",
+    "Hume": "Hume (DT)",
+    "Admiralty": "Admiralty (NS)",
+    "Nicoll Highway": "Nicoll Highway (CC)",
+    "Bugis": "Bugis (EW-DT)"
+}
+
 # --- Dynamic SQL Query Generation using LLM ---
 def get_sql_chain(db):
     template = """
-You are Aba from Adobha Co-living. Based on the database schema provided and the conversation history, generate a valid, single-line SQL query that finds rooms matching the user's preferences.  
-**Crucially, return ONLY the SQL query itself. Do NOT include any additional text, comments, markdown code blocks, or explanations.**  
-Do not add any additional text, only the SQL query.  
+You are Aba from Adobha Co-living. Based on the database schema, conversation history, and MRT station dictionary, generate a valid, single-line SQL query that finds rooms matching the user's preferences.  
+**Return ONLY the SQL query itself—no additional text, comments, markdown, or explanations.**
 
 ## **Database Schema:**  
 {schema}  
@@ -317,64 +343,65 @@ Do not add any additional text, only the SQL query.
 ## **Conversation History:**  
 {chat_history}  
 
-## **Question:**  
+## **User Question:**  
 {question}  
 
----
-
-## **Important Instructions:**  
-
-### **1. Status Handling**  
-Only include rooms where `rooms.occupancystatus` is either `'Vacant'`, `'Available Soon'`, or `'Available Immediately'`, and the associated property's status (`properties.status`) is `'a'`.  
-
-### **2. Room Details**  
-Include only:  
-- **Building Name** → `MAX(properties.buildingname) AS BuildingName`  
-- **Nearest MRT** → `MAX(properties.nearestmrt) AS NearestMRT`
-- **Rent** → `MAX(rooms.sellingprice) AS Rent`  
-- **Amenities** → ALL `true` amenities from `rooms`(Dont forget to include aircon)  
-- **Washroom details** → `MAX(washrooms.size) AS WashroomSize`, `MAX(washrooms.location) AS WashroomLocation`  
-
-### **3. Filter Requirements**  
-ALWAYS include these filters when mentioned by the user:  
-- **Nearest MRT station** → Use `properties.nearestmrt LIKE '%station_name%'`  
-- **Budget Range** → Map to `rooms.sellingprice` (NOT `rentmonth`), using `BETWEEN min_budget AND max_budget`  
-- **Max Occupancy** → Use `rooms.maxoccupancy`  
-- **Washroom Preferences** (see below)  
-- **Any amenities explicitly mentioned by the user**  
-
-### **4. Washroom Preferences Filtering (ALWAYS INCLUDE when mentioned)**  
-- If **"private"**, filter rooms where `washroomno = 1` AND `washrooms.location = 'Within Room'`.  
-- If **"shared"**, filter rooms where `washroomno > 1` OR `washrooms.location != 'Within Room'`.  
-- If `totalusers` is mentioned, use `COALESCE(washrooms.totalusers, 0) > X` in the `JOIN` condition, NOT in `WHERE`.  
-
-### **5. 🚨 CRITICAL: Aggregation for Non-Grouped Columns**  
-- When using `GROUP BY rooms.roomid`, you MUST apply **aggregate functions (`MAX()`, `MIN()`)** to ALL non-grouped columns.  
-- Use `MAX()` for all property columns, room columns, and washroom columns.  
-- For amenities, use `MAX(CASE WHEN rooms.amenity = 'true' THEN 'AmenityName' END)` for EACH amenity.  
-- Include ALL available amenities in the database, not just a subset.  
-
-### **6. 🚨 LEFT JOIN Filtering**  
-- **DO NOT** place `LEFT JOIN` filtering conditions in the `WHERE` clause.  
-- Always move `LEFT JOIN` filters to the `ON` clause using `COALESCE()` for NULL handling.  
-
-### **7. Limit Results**  
-Default to **5 rows** unless the user specifies otherwise.  
+## **MRT Station Dictionary:**  
+{mrt_dictionary}  
+- Use the exact station name from this dictionary when the user mentions an MRT station. Map the user’s input to the closest matching key and use its value (e.g., if user says "Cashew", use "Cashew (DT)" if that’s the value).  
 
 ---
 
-## 🚨 **Key Fixes Applied:**  
-✅ **Nearest MRT** is now `properties.nearestmrt`  
-✅ **Budget filtering** is always based on `rooms.sellingprice`, NOT `rentmonth`.  
+## **Instructions:**  
+
+### **1. Status Filtering**  
+- Include only rooms where `rooms.occupancystatus` is `'Vacant'`, `'Available Soon'`, or `'Available Immediately'`.  
+- Ensure `properties.status` is `'a'`.  
+
+### **2. Required Columns**  
+- **Building Name**: `MAX(properties.buildingname) AS BuildingName`  
+- **Nearest MRT**: `MAX(properties.nearestmrt) AS NearestMRT`  
+- **Rent**: `MAX(rooms.sellingprice) AS Rent`  
+- **Amenities**: Include ALL `true` amenities from `rooms` using `MAX(CASE WHEN rooms.[amenity] = 'true' THEN 'AmenityName' END)` (e.g., `aircon`, `wifi`). Always include `aircon`.  
+- **Washroom Details**: `MAX(washrooms.size) AS WashroomSize`, `MAX(washrooms.location) AS WashroomLocation`  
+
+### **3. User Preference Filters**  
+Apply these when mentioned:  
+- **Nearest MRT**: Use the exact value from the MRT dictionary (e.g., `properties.nearestmrt = 'Cashew (DT)'`). Do NOT modify or use wildcards.  
+- **Budget**: Filter `rooms.sellingprice` with `BETWEEN min_budget AND max_budget`.  
+- **Max Occupancy**: Filter `rooms.maxoccupancy = value`.  
+- **Washroom Preferences**: See below.  
+- **Amenities**: Filter `rooms.[amenity] = 'true'` for each mentioned amenity.  
+
+### **4. Washroom Preferences**  
+- **"Private"**: `washroomno = 1 AND washrooms.location = 'Within Room'`.  
+- **"Shared"**: `washroomno > 1 OR washrooms.location != 'Within Room'`.  
+- **Total Users**: Use `COALESCE(washrooms.totalusers, 0) <= X` in the `LEFT JOIN ON` clause.  
+
+### **5. Query Structure**  
+- **Joins**: Use `JOIN properties ON rooms.propertyid = properties.propertyid` and `LEFT JOIN washrooms ON rooms.roomid = washrooms.roomid`.  
+- **Grouping**: Always `GROUP BY rooms.roomid`.  
+- **Aggregation**: Apply `MAX()` to ALL non-grouped columns.  
+- **LEFT JOIN Filters**: Place conditions in the `ON` clause with `COALESCE()`.  
+
+### **6. Result Limit**  
+- Default to `LIMIT 5` unless specified otherwise.  
+
+### **7. Edge Cases**  
+- If no preferences are given, return all available rooms (per status rules).  
+- If the user’s MRT input doesn’t match a dictionary key, use the closest reasonable match or skip the filter.  
 
 ---
- **SQL Query:**  
 
-""" 
+**SQL Query:**  
+"""
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     return (
-        RunnablePassthrough.assign(schema=lambda _: db.get_table_info())
+        RunnablePassthrough.assign(
+            schema=lambda _: db.get_table_info(),
+            mrt_dictionary=lambda _: mrt_dictionary  # Add mrt_dictionary here
+        )
         | prompt
         | llm
         | StrOutputParser()
@@ -489,7 +516,7 @@ Do not mention the <RESULTS> tags.
 Aba’s response:
 """
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     return prompt | llm | StrOutputParser()
 
 
@@ -516,7 +543,7 @@ If the user asks a question or goes off-topic, address it briefly and then ask f
 Aba’s response:
 """
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     return (
         RunnablePassthrough.assign(info=lambda _: st.session_state.get("existing_user_info", {}))
         | prompt
@@ -580,7 +607,7 @@ User’s Latest Query:
 Aba’s Response:
 """
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     return (
         RunnablePassthrough.assign(preferences=lambda _: st.session_state.get("preferences", {}))
         | prompt
@@ -626,11 +653,11 @@ def classify_intent(chat_history, user_query):
     Intent:
     """
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     return prompt | llm | StrOutputParser()
 
 def generate_dynamic_prompt(step, preferences, chat_history, user_query):
-    llm = ChatOpenAI(model="gpt-4-0125-preview")
+    llm = ChatOpenAI(model="gpt-4o-mini")
     chat_history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history])
 
     if step == "step1_basic_details":
