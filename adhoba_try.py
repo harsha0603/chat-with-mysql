@@ -707,161 +707,194 @@ def generate_dynamic_prompt(step, preferences, chat_history, user_query):
 def get_response(user_query: str, chat_history: list):
     new_history = chat_history + [HumanMessage(content=user_query)]
     
-    # Step 1: User type
+    # STEP 1: Determine user type (existing vs new) first
     if st.session_state["user_type"] is None:
         user_type = classify_user_type(chat_history, user_query)
         st.session_state["user_type"] = user_type
+        
         if user_type == "existing":
             return "Hi! Let's sort out your issue—could you share your address?"
         elif user_type == "new":
             st.session_state["current_step"] = "step1_basic_details"
             return generate_dynamic_prompt("step1_basic_details", st.session_state["preferences"], new_history, user_query)
         return "Not sure if you're new or existing—could you clarify?"
-
-    # Step 2: Extract preferences
+    
+    # STEP 2: Extract preferences from the message
     extracted = extract_preferences(new_history)
     st.session_state["preferences"].update(extracted)
-
-    # Step 3: Intent
+    
+    # STEP 3: Classify intent
     intent_chain = classify_intent(new_history, user_query)
     intent = intent_chain.invoke({"chat_history": new_history, "user_query": user_query}).strip().lower()
-
-    if intent == "viewing_request":
-        viewing_prompt = """
-    You are Aba from Adobha Co-living. Handle a viewing request naturally and stay focused on completing it:
-    - If the user hasn’t provided any viewing details yet (full name, phone number, date/time), ask: "Could you please provide your full name, phone number (must be a valid Singapore number: +65 or 65 followed by exactly 8 digits, e.g., +6591234567), and your preferred date/time for the viewing?"
-    - If the user provides some or all details in the current query or history, extract them (full name, phone number, date/time). Then:
-      - Validate the phone number: it must start with +65 or 65 and have exactly 8 digits. If invalid (e.g., wrong format, too many/few digits), say: "Hmm, that doesn’t look like a valid Singapore number. Could you provide one that starts with +65 or 65 followed by 8 digits, like +6591234567?" and stop there.
-      - If the phone number is valid but other details are missing, acknowledge what’s provided and ask for the rest (e.g., "Thanks, [name]! I’ve got your number [phone]. Could you let me know your preferred date/time?").
-      - If all details are provided and the phone number is valid, confirm: "Here’s what I’ve got: [name], [phone number], [date/time]. Your viewing is scheduled at [property address from preferences, or '123 Adobha Lane, Singapore' if none specified]. When you get there, just let me know you’ve arrived!" and do not list properties again.
-    - Use the chat history and current query to determine what’s already been provided—don’t restart the process unnecessarily.
-    - Keep the tone friendly and conversational, and focus on completing the viewing request without reverting to property listings.
-    History: {chat_history}
-    Query: {user_query}
-    Preferences: {preferences}
-    """
-        return generate_llm_response(
-            new_history,
-            user_query,
-            viewing_prompt,
-            preferences=st.session_state["preferences"]
-        )
     
-    elif intent == "information_request" and st.session_state.get("last_room_results"):
-        info_prompt = """
-        You are Aba from Adobha Co-living. You're having a natural conversation with a potential resident about housing.
-        
-        History: {chat_history}
-        Query: {user_query}
-        Preferences: {preferences}
-        Room Results: {room_results}
-        BuildingName: {BuildingName}
-        rental_duration: {rental_duration}
-        
-        Guidelines:
-        - Answer questions about previously mentioned properties directly and conversationally.
-        - DO NOT generate SQL queries for follow-up questions about properties already mentioned.
-        - Use the Room Results provided to answer specific questions about properties.
-        - Use a friendly, helpful tone that feels like talking to a knowledgeable friend, not a form-filling bot.
-        - If you don't know specific details about a property, offer to find out rather than making up information.
-        - Common information you can provide includes: pet policies, cooking rules, visitor policies, parking, additional charges, and lease terms.
-        - Let the conversation flow naturally - don't force the user down a predetermined path.
-        - Only suggest next steps when it feels natural in the conversation, not after every response.
-        
-        Remember: The goal is to help the user find their ideal home through natural conversation, not to check boxes on a form.
-        """
-        
-        # Extract building name from results if available
-        building_name = None
-        if st.session_state.get("last_room_results") and len(st.session_state["last_room_results"]) > 0:
-            if "BuildingName" in st.session_state["last_room_results"][0]:
-                building_name = st.session_state["last_room_results"][0]["BuildingName"]
-        
-        variables = {
-    "chat_history": new_history,
-    "user_query": user_query,
-    "preferences": st.session_state["preferences"],
-    "room_results": st.session_state["last_room_results"],
-    "rental_duration": st.session_state["preferences"].get("rental_duration", "your stay")
-}
-
-# Only add BuildingName if it exists
-        if building_name:
-            variables["BuildingName"] = building_name
-        
-        # Pass all needed variables to the function
-        return generate_llm_response(
-            new_history, 
-            user_query, 
-            info_prompt,
-            preferences=st.session_state["preferences"],
-            room_results=st.session_state["last_room_results"],
-            BuildingName=building_name,
-            rental_duration=rental_duration
-        )
-
-    # Step 5: Handle user types
+    # Store the last intent for context maintenance
+    if "last_intent" not in st.session_state:
+        st.session_state["last_intent"] = None
+    
+    # STEP 4: Branch based on user type and intent
+    
+    # BRANCH A: Handle existing users
     if st.session_state["user_type"] == "existing":
+        # Handle viewing request for existing users
+        if intent == "viewing_request" or st.session_state.get("last_intent") == "viewing_request":
+            st.session_state["last_intent"] = "viewing_request"
+            return handle_viewing_request(new_history, user_query, st.session_state["preferences"])
+        
+        # Handle regular existing user flow
         extracted_info = extract_existing_user_info(new_history)
         st.session_state["existing_user_info"].update(extracted_info)
         missing = [k for k, v in st.session_state["existing_user_info"].items() if v is None]
         if not missing:
             return "Thank you! I've received everything we need and will get back to you soon. Apologies for any inconvenience."
         return f"Got it! What's your {missing[0]}?"
+    
+    # BRANCH B: Handle new users
     elif st.session_state["user_type"] == "new":
-        # Validate rental duration
-        rental_duration = st.session_state["preferences"].get("rental_duration")
-        if rental_duration and "month" in rental_duration.lower():
-            try:
-                months = int(rental_duration.split()[0])
-                if months < 3:
-                    st.session_state["preferences"]["rental_duration"] = None
-                    return "Could you kindly update your rental duration to a minimum of three months? We appreciate your understanding."
-            except ValueError:
-                pass
+        if intent == "viewing_request" or st.session_state.get("last_intent") == "viewing_request":
+            st.session_state["last_intent"] = "viewing_request"
+            return handle_viewing_request(new_history, user_query, st.session_state["preferences"])
+        
+        elif intent == "information_request" and st.session_state.get("last_room_results"):
+            st.session_state["last_intent"] = "information_request"
 
-        # Step-based flow with dynamic prompts
-        if st.session_state["current_step"] == "step1_basic_details":
-            missing = [f for f in ["rental_duration", "pass_type", "move_in_date"] if st.session_state["preferences"][f] is None]
-            if missing:
-                return generate_dynamic_prompt("step1_basic_details", st.session_state["preferences"], new_history, user_query)
-            st.session_state["current_step"] = "step2_room_preferences"
-            return generate_dynamic_prompt("step2_room_preferences", st.session_state["preferences"], new_history, user_query)
+    # FAQ Dictionary
+            faq_responses = {
+        "Is cooking allowed?": "Yes, cooking is allowed.",
+        "Can I bring visitors?": "Yes, you can bring visitors, but please inform or seek permission before hosting anyone.",
+        "Is parking allowed?": "Yes, parking is allowed. Could you provide details like your vehicle's plate number?",
+        "What other charges besides rent?": "Besides rent, there are additional charges: Housekeeping ($30/month) and Aircon service ($60/quarter)."
+    }
+            info_prompt = """
+            You are Aba from Adobha Co-living, assisting a potential resident with housing inquiries.
+            Your goal is to provide clear, friendly, and helpful responses to FAQs and questions about available properties.
 
-        elif st.session_state["current_step"] == "step2_room_preferences":
-            missing = [f for f in ["washroom_preference", "occupants", "min_budget", "max_budget"] if st.session_state["preferences"][f] is None]
-            if missing:
-                return generate_dynamic_prompt("step2_room_preferences", st.session_state["preferences"], new_history, user_query)
-            st.session_state["current_step"] = "step3_mrt_preferences"
-            return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
+            Frequently Asked Questions:
+            {faq_responses}
 
-        elif st.session_state["current_step"] == "step3_mrt_preferences":
-            if st.session_state["mrt_sub_step"] == "choose_line":
-                if st.session_state["preferences"]["preferred_mrt_line"]:
-                    st.session_state["mrt_sub_step"] = "choose_station"
-                    return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
-                return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
+            Guidelines:
+            - Answer frequently asked questions directly using the provided FAQ data.
+            - If a user asks about a previously discussed property, provide details in a natural, conversational manner.
+            - Use the Room Results to give accurate answers—avoid assumptions or incomplete responses.
+            - If certain details are unknown, politely offer to find out instead of making up information.
+            - Maintain a warm, helpful tone, as if you were a knowledgeable friend assisting in their housing search.
+            - Let the conversation flow naturally—only suggest next steps when it feels appropriate.
+            """
+            return generate_llm_response(
+                new_history,
+                user_query,
+                info_prompt,
+                chat_history=new_history,
+                user_query=user_query,
+                preferences=st.session_state["preferences"],
+                room_results=st.session_state["last_room_results"],
+                faq_responses=faq_responses
+            )
+        
+        # Handle step-based flow for new users
+        else:
+            st.session_state["last_intent"] = None  # Reset last intent
             
-            elif st.session_state["mrt_sub_step"] == "choose_station":
-                if st.session_state["preferences"]["preferred_mrt"]:
-                    # Both MRT line and station are set—proceed to room search
-                    sql_query = generate_query_from_preferences(new_history, user_query)
-                    results = execute_query(sql_query)
-                    if results["status"] == "success" and results["data"]:
-                        st.session_state["last_room_results"] = results["data"]
-                        response = get_property_info_chain().invoke({"results": results["data"], "chat_history": chat_history, "question": user_query})
-                        return response + "\nThese rooms are available now—let me know if they work for your move-in plans!"
-                    else:
-                        relaxed_query = sql_query.replace(f"AND r.sellingprice BETWEEN {st.session_state['preferences']['min_budget']} AND {st.session_state['preferences']['max_budget']}", "")
-                        results = execute_query(relaxed_query)
+            # Validate rental duration
+            rental_duration = st.session_state["preferences"].get("rental_duration")
+            if rental_duration and "month" in rental_duration.lower():
+                try:
+                    months = int(rental_duration.split()[0])
+                    if months < 3:
+                        st.session_state["preferences"]["rental_duration"] = None
+                        return "Could you kindly update your rental duration to a minimum of three months? We appreciate your understanding."
+                except ValueError:
+                    pass
+
+            # Step-based flow with dynamic prompts
+            if st.session_state["current_step"] == "step1_basic_details":
+                missing = [f for f in ["rental_duration", "pass_type", "move_in_date"] if st.session_state["preferences"][f] is None]
+                if missing:
+                    return generate_dynamic_prompt("step1_basic_details", st.session_state["preferences"], new_history, user_query)
+                st.session_state["current_step"] = "step2_room_preferences"
+                return generate_dynamic_prompt("step2_room_preferences", st.session_state["preferences"], new_history, user_query)
+
+            elif st.session_state["current_step"] == "step2_room_preferences":
+                missing = [f for f in ["washroom_preference", "occupants", "min_budget", "max_budget"] if st.session_state["preferences"][f] is None]
+                if missing:
+                    return generate_dynamic_prompt("step2_room_preferences", st.session_state["preferences"], new_history, user_query)
+                st.session_state["current_step"] = "step3_mrt_preferences"
+                st.session_state["mrt_sub_step"] = "choose_line"  # Initialize MRT sub-step
+                return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
+
+            elif st.session_state["current_step"] == "step3_mrt_preferences":
+                if st.session_state["mrt_sub_step"] == "choose_line":
+                    if st.session_state["preferences"].get("preferred_mrt_line"):
+                        st.session_state["mrt_sub_step"] = "choose_station"
+                        return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
+                    return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
+                
+                elif st.session_state["mrt_sub_step"] == "choose_station":
+                    if st.session_state["preferences"].get("preferred_mrt"):
+                        # Both MRT line and station are set—proceed to room search
+                        sql_query = generate_query_from_preferences(new_history, user_query)
+                        results = execute_query(sql_query)
                         if results["status"] == "success" and results["data"]:
                             st.session_state["last_room_results"] = results["data"]
-                            return f"No rooms match your budget, but here's what's close:\n" + get_property_info_chain().invoke({"results": results["data"], "chat_history": chat_history, "question": user_query})
-                        return "I couldn't find any rooms near your chosen MRT station. Want to adjust your budget or pick another station?"
-                return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
+                            response = get_property_info_chain().invoke({"results": results["data"], "chat_history": chat_history, "question": user_query})
+                            return response + "\nThese rooms are available now—let me know if they work for your move-in plans!"
+                        else:
+                            relaxed_query = sql_query.replace(f"AND r.sellingprice BETWEEN {st.session_state['preferences']['min_budget']} AND {st.session_state['preferences']['max_budget']}", "")
+                            results = execute_query(relaxed_query)
+                            if results["status"] == "success" and results["data"]:
+                                st.session_state["last_room_results"] = results["data"]
+                                return f"No rooms match your budget, but here's what's close:\n" + get_property_info_chain().invoke({"results": results["data"], "chat_history": chat_history, "question": user_query})
+                            return "I couldn't find any rooms near your chosen MRT station. Want to adjust your budget or pick another station?"
+                    return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
     
     # Default fallback response
     return "I'm not sure how to help with that. Could you rephrase or provide more details?"
+
+
+def handle_viewing_request(chat_history, user_query, preferences):
+    """
+    Handle viewing request with appropriate confirmation and context maintenance.
+    """
+    viewing_prompt = """
+    You are Aba from Adobha Co-living. You're handling a viewing request for a property.
+    
+    IMPORTANT RULES:
+    1. NEVER revert to listing properties after handling a viewing request
+    2. Stay focused on the viewing scheduling task
+    3. Keep responses conversational and natural
+    4. This is a VIEWING REQUEST - do not change the subject
+    
+    Analyze the conversation and determine if the user has provided:
+    - Full name
+    - Phone number (valid Singapore format: +65 or 65 followed by 8 digits)
+    - Preferred date/time for viewing
+    
+    If all information is provided, confirm the viewing with all details:
+    "Here's what I've got: [name], [phone], [datetime]. Your viewing is scheduled at [property]. When you get there, just let me know you've arrived!"
+    
+    If information is missing, acknowledge what's been provided and ask for the missing details.
+    
+    For phone numbers, validate they follow Singapore format (+65 or 65 + 8 digits).
+    
+    Chat History: {chat_history}
+    User Query: {user_query}
+    Preferences: {preferences}
+    """
+    
+    # Get building name from preferences or last room results
+    building_name = None
+    if "last_room_results" in st.session_state and st.session_state["last_room_results"]:
+        if "BuildingName" in st.session_state["last_room_results"][0]:
+            building_name = st.session_state["last_room_results"][0]["BuildingName"]
+    
+    property_address = f"{building_name if building_name else 'the property you are interested in'}"
+    
+    return generate_llm_response(
+        chat_history, 
+        user_query, 
+        viewing_prompt,
+        preferences=preferences,
+        property_address=property_address
+    )
 
 # Custom CSS with fixed sidebar visibility
 custom_css = """
