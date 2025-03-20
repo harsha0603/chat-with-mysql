@@ -495,7 +495,7 @@ You are Aba from Adobha Co-living. Collect the following from an existing user:
 - Address
 - Room number
 - Name of the user
-- Number of the customer
+- Number of the user
 - Problem 
 
 Current info:
@@ -633,10 +633,7 @@ def classify_intent(chat_history, user_query):
 
 def get_response(user_query: str, chat_history: list):
     new_history = chat_history + [HumanMessage(content=user_query)]
-    # Add user message to chat history
-    st.session_state["chat_history"].append(HumanMessage(content=user_query))
-    
-    # Classify intent to determine how to respond
+
     chain = classify_intent(st.session_state["chat_history"], user_query)
     intent = chain.invoke({
     "chat_history": st.session_state["chat_history"],
@@ -797,7 +794,6 @@ def get_response(user_query: str, chat_history: list):
         )
     
     # Add assistant's response to chat history
-    st.session_state["chat_history"].append(AIMessage(content=response))
     
     return response
 
