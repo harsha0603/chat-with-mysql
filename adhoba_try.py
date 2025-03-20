@@ -81,7 +81,7 @@ if "user_type" not in st.session_state:
     st.session_state["user_type"] = None
 if "existing_user_info" not in st.session_state:
     st.session_state["existing_user_info"] = {
-        "address": None, "room_number": None, "problem": None
+        "address": None, "room number": None, "name": None, "phone number": None, "problem": None
     }
 if "last_room_results" not in st.session_state:
     st.session_state["last_room_results"] = []
@@ -164,7 +164,9 @@ def extract_existing_user_info(chat_history):
     template = """
 You are Aba from Adobha Co-living. Extract the following from the conversation history for an existing user:
 - address
-- room_number
+- room number
+- name
+- phone number 
 - problem
 
 Conversation History:
@@ -180,7 +182,7 @@ Extracted Info (return as JSON with null for missing fields):
     try:
         return json.loads(cleaned_response)
     except json.JSONDecodeError:
-        return {"address": None, "room_number": None, "problem": None}
+        return {"address": None, "room number": None, "name": None, "phone number ": None, "problem": None}
     
 
 from datetime import datetime
@@ -245,14 +247,16 @@ def get_mrt_stations(mrt_line):
     pattern_alt = f"% {mrt_line_code}%"  # Non-bracketed format
 
     query = """
-    SELECT DISTINCT p.nearestmrt 
-    FROM properties p 
-    JOIN rooms r ON r.propertyid = p.propertyid 
-    WHERE (p.nearestmrt LIKE :pattern OR p.nearestmrt LIKE :pattern_alt)
-      AND r.occupancystatus IN ('Vacant', 'Available Soon', 'Available Immediately') 
-      AND p.status = 'a'
-    ORDER BY p.nearestmrt
-    """
+SELECT DISTINCT p.nearestmrt 
+FROM properties p 
+JOIN rooms r ON r.propertyid = p.propertyid 
+WHERE (p.nearestmrt LIKE :pattern OR p.nearestmrt LIKE :pattern_alt)
+  AND r.occupancystatus IN ('Vacant', 'Available Soon', 'Available Immediately') 
+  AND r.sellingprice > 0
+  AND p.status = 'a'
+ORDER BY p.nearestmrt
+"""
+
 
     try:
         with engine.connect() as conn:
@@ -331,7 +335,7 @@ You are Aba from Adobha Co-living. Based on the database schema, conversation hi
 - **Building Name**: `MAX(properties.buildingname) AS BuildingName`  
 - **Nearest MRT**: `MAX(properties.nearestmrt) AS NearestMRT`  
 - **Rent**: `MAX(rooms.sellingprice) AS Rent`  
-- **Amenities**: Include ALL `true` amenities from `rooms` using `MAX(CASE WHEN rooms.[amenity] = 'true' THEN 'AmenityName' END)` (e.g., `aircon`, `wifi`). Always include `aircon`.  
+- **Amenities**: Include ALL `true` amenities from `rooms` using `MAX(CASE WHEN rooms.[amenity] = 'true' THEN 'AmenityName' END)` Always include `aircon`.  
 - **Washroom Details**: `MAX(washrooms.size) AS WashroomSize`, `MAX(washrooms.location) AS WashroomLocation`  
 
 ### **3. User Preference Filters**  
@@ -347,8 +351,7 @@ Apply these when mentioned:
 
 ### **4. Washroom Preferences**  
 - **"Private"**: `washrooms.location = 'Within Room'`.  
-- **"Shared"**: `washrooms.location != 'Within Room'`.  
-- **Total Users**: Use `COALESCE(washrooms.totalusers, 0) <= X` in the `LEFT JOIN ON` clause.  
+- **"Shared"**: `washrooms.location = 'Outside Room'`.   
 
 ### **5. Query Structure**  
 - **Joins**: Use `JOIN properties ON rooms.propertyid = properties.propertyid` and `LEFT JOIN washrooms ON properties.propertyid = washrooms.propertyid`.  
@@ -491,8 +494,9 @@ def collect_existing_user_info_chain():
 You are Aba from Adobha Co-living. Collect the following from an existing user:
 - Address
 - Room number
-- Problem
-- Name and Number 
+- Name of the user
+- Number of the customer
+- Problem 
 
 Current info:
 {info}
@@ -504,7 +508,7 @@ User’s latest query:
 {question}
 
 If the user provides info, thank them and ask for the next missing piece of information.
-If all info is collected, say: "Thank you! I’ve got everything I need. How can I assist with your problem?"
+If all info is collected, say: "Thank you! I’ve got everything I need!."
 If the user asks a question or goes off-topic, address it briefly and then ask for the next missing piece.
 
 Aba’s response:
@@ -520,47 +524,51 @@ Aba’s response:
 
 def collect_new_user_info_chain():
     template = """
-You are Aba from Adobha Co-living. Collect the following details from a new user in a structured manner:
+You are Aba from Adobha Co-living. Collect the following details from a new user one question at a time in a structured manner:
 
-### **Step 1: Basic Details**
-- Rental duration (must be at least 3 months)
-- Pass type (EP, Student, Work)
-- Move-in date
+### **User Information Collection**
 
-### **Step 2: Room Preferences**
-- Washroom preference (private or shared)
-- Number of occupants
-- Budget range (min and max)
+Ask the following questions one by one:
 
-### Step 3: MRT Selection
-Ask the user:
-"Which MRT Line are you interested in?"
+1. "What is your rental duration? (Minimum 3 months)"
+   - If the response is less than 3 months, say: 
+     "We kindly request a minimum rental duration of three months. Please ensure that the duration provided meets or exceeds this requirement."
+   
+2. "What is your pass type? (EP, Student, Work)"
+    - If response is "Tourist", say:
+      "Currently, we regret to inform you that our services are not available for tourists. We sincerely apologize for any inconvenience."
 
-Provide options: East-West Line (EW), Downtown Line (DT), North-South Line (NS), Circle Line (CC), North-East Line (NE), Thomson-East Coast Line (TE).
-Store the response as preferred_mrt_line (e.g., "EW", "DT", "NS").
-Based on the user’s choice, show the relevant MRT stations:
+3. "What is your move-in date?"
 
-East-West Line (EW) → Kembangan (EW), Simei (EW), Chinese Garden (EW), Eunos (EW), Pasir Ris (EW).
-Downtown Line (DT) → Upper Changi (DT), Cashew (DT), Hume (DT), Mountbatten (DT).
-North-South Line (NS) → Admiralty (NS), Novena (NS), Orchard (NS), Yio Chu Kang (NS), Yew Tee (NS).
-Circle Line (CC) → Nicoll Highway (CC), Holland Village (CC), Mountbatten (CC).
-North-East Line (NE) → Woodleigh (NE).
-Thomson-East Coast Line (TE) → Lentor (TE), Upper Changi East (TE).
-Ask the user to choose a station from the selected MRT line.
+4. "Do you prefer a private or shared washroom?"
 
-Store the response as preferred_mrt (e.g., "Simei (EW)").
+5. "How many occupants will be staying?"
 
-### **Step 4: Additional Details**
-- Nationality 
-- Gender
+6. "What is your budget range? (Please provide min and max budget)"
+
+7. "Which MRT Line are you interested in?"
+   - Provide options: East-West Line (EW), Downtown Line (DT), North-South Line (NS), Circle Line (CC), North-East Line (NE), Thomson-East Coast Line (TE).
+   - Store the response as preferred_mrt_line.
+
+8. "Which station do you prefer?"
+   - Based on the selected MRT line, show relevant stations:
+     - EW: Kembangan, Simei, Chinese Garden, Eunos, Pasir Ris
+     - DT: Upper Changi, Cashew, Hume, Mountbatten
+     - NS: Admiralty, Novena, Orchard, Yio Chu Kang, Yew Tee
+     - CC: Nicoll Highway, Holland Village, Mountbatten
+     - NE: Woodleigh
+     - TE: Lentor, Upper Changi East
+   - Store the response as preferred_mrt.
+
+9. "What is your nationality?"
+
+10. "What is your gender?"
 
 ### **Guidelines for Interaction**
-- If rental duration is **less than 3 months**, say:  
-   "We require a minimum rental duration of 3 months. Please provide a duration of at least 3 months."
-- If the user provides partial info, thank them and ask for the next missing detail.
+- If the user provides partial info, thank them and move to the next missing question.
 - If all details are collected, say:  
-   "Thank you! I’ve got everything I need. Let me find some great options for you!"
-- If the user asks unrelated questions, respond briefly before steering back to the next missing detail.
+  "Thank you! I’ve got everything I need. Let me find some great options for you!"
+- If the user asks unrelated questions, respond briefly before steering back to the next missing question.
 
 Current Preferences:
 {preferences}
@@ -623,278 +631,337 @@ def classify_intent(chat_history, user_query):
     llm = ChatOpenAI(model="gpt-4o-mini")
     return prompt | llm | StrOutputParser()
 
-def generate_dynamic_prompt(step, preferences, chat_history, user_query):
-    llm = ChatOpenAI(model="gpt-4o-mini")
-    chat_history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history])
-
-    if step == "step1_basic_details":
-        missing = [f for f in ["rental_duration", "pass_type", "move_in_date"] if preferences[f] is None]
-        template = f"""
-        You are Aba from Adobha Co-living. Generate a friendly, natural question asking for:
-        - How long they want to rent for
-        - Pass type (EP, Student, Work)
-        - Move-in date
-        Current preferences: {preferences}
-        Missing: {missing}
-        History: {chat_history_str}
-        User query: {user_query}
-        Return only the question/response, no extra text.
-        """
-        return llm.invoke(template).content.strip()
-
-    elif step == "step2_room_preferences":
-        missing = [f for f in ["washroom_preference", "occupants", "min_budget", "max_budget"] if preferences[f] is None]
-        template = f"""
-        You are Aba from Adobha Co-living. Acknowledge Step 1 prefs and ask for:
-        - Washroom preference (private or shared)
-        - Number of occupants
-        - Budget range (min and max)
-        Current preferences: {preferences}
-        Missing: {missing}
-        History: {chat_history_str}
-        User query: {user_query}
-        Return only the question/response, no extra text.
-        """
-        return llm.invoke(template).content.strip()
-
-    
-    elif step == "step3_mrt_preferences":
-        if "mrt_sub_step" not in st.session_state:
-            return "Hmm, something went wrong. Let’s try that again—what are your preferences?"
-    
-    if st.session_state["mrt_sub_step"] == "choose_line":
-        template = f"""
-        You are Aba from Adobha Co-living. Acknowledge Step 2 preferences and ask:
-        
-        - Which MRT line do you prefer? Here are the available options:
-          - East-West Line (EW)
-          - Downtown Line (DT)
-          - North-South Line (NS)
-          - Circle Line (CC)
-          - North-East Line (NE)
-          - Thomson-East Coast Line (TE)
-        
-        Current preferences: {preferences}
-        History: {chat_history_str}
-        User query: {user_query}
-        Return only the question/response, no extra text.
-        """
-    
-    elif st.session_state["mrt_sub_step"] == "choose_station":
-        mrt_line = preferences.get("preferred_mrt_line", "")
-        stations = get_mrt_stations(mrt_line)
-        
-        if not stations:
-            return "Looks like no stations are available on that line right now. Want to pick a different line?"
-        
-        stations_list = ", ".join(stations)
-        template = f"""
-        You are Aba from Adobha Co-living. Show available MRT stations and ask:
-        - Available stations on {mrt_line}: {stations_list}
-        - Which station they prefer
-        
-        Current preferences: {preferences}
-        History: {chat_history_str}
-        User query: {user_query}
-        Return only the question/response, no extra text.
-        """
-
-    else:
-        return "Hmm, something went wrong. Let’s try that again—what are your preferences?"
-
-    return llm.invoke(template).content.strip()
-
 def get_response(user_query: str, chat_history: list):
     new_history = chat_history + [HumanMessage(content=user_query)]
+    # Add user message to chat history
+    st.session_state["chat_history"].append(HumanMessage(content=user_query))
     
-    # STEP 1: Determine user type (existing vs new) first
-    if st.session_state["user_type"] is None:
-        user_type = classify_user_type(chat_history, user_query)
-        st.session_state["user_type"] = user_type
+    # Classify intent to determine how to respond
+    chain = classify_intent(st.session_state["chat_history"], user_query)
+    intent = chain.invoke({
+    "chat_history": st.session_state["chat_history"],
+    "user_query": user_query
+    }).strip().lower()
+
+    logger.info(f"Classified intent: {intent}")
+    
+    # Check if we're in the process of identifying user type
+    if st.session_state["current_step"] == "identify_user":
+        # Determine if user is new or existing
+        user_type = classify_user_type(st.session_state["chat_history"], user_query).strip().lower()
+        logger.info(f"User type classified as: {user_type}")
         
         if user_type == "existing":
-            return "Hi! Let's sort out your issue—could you share your address?"
+            st.session_state["user_type"] = "existing"
+            st.session_state["current_step"] = "collect_existing_user_info"
+            response = collect_existing_user_info_chain().invoke({
+                "chat_history": st.session_state["chat_history"],
+                "question": user_query
+            })
         elif user_type == "new":
-            st.session_state["current_step"] = "step1_basic_details"
-            return generate_dynamic_prompt("step1_basic_details", st.session_state["preferences"], new_history, user_query)
-        return "Not sure if you're new or existing—could you clarify?"
-    
-    # STEP 2: Extract preferences from the message
-    extracted = extract_preferences(new_history)
-    st.session_state["preferences"].update(extracted)
-    
-    # STEP 3: Classify intent
-    intent_chain = classify_intent(new_history, user_query)
-    intent = intent_chain.invoke({"chat_history": new_history, "user_query": user_query}).strip().lower()
-    
-    # Store the last intent for context maintenance
-    if "last_intent" not in st.session_state:
-        st.session_state["last_intent"] = None
-    
-    # STEP 4: Branch based on user type and intent
-    
-    # BRANCH A: Handle existing users
-    if st.session_state["user_type"] == "existing":
-        # Handle viewing request for existing users
-        if intent == "viewing_request" or st.session_state.get("last_intent") == "viewing_request":
-            st.session_state["last_intent"] = "viewing_request"
-            return handle_viewing_request(new_history, user_query, st.session_state["preferences"])
-        
-        # Handle regular existing user flow
-        extracted_info = extract_existing_user_info(new_history)
-        st.session_state["existing_user_info"].update(extracted_info)
-        missing = [k for k, v in st.session_state["existing_user_info"].items() if v is None]
-        if not missing:
-            return "Thank you! I've received everything we need and will get back to you soon. Apologies for any inconvenience."
-        return f"Got it! What's your {missing[0]}?"
-    
-    # BRANCH B: Handle new users
-    elif st.session_state["user_type"] == "new":
-        if intent == "viewing_request" or st.session_state.get("last_intent") == "viewing_request":
-            st.session_state["last_intent"] = "viewing_request"
-            return handle_viewing_request(new_history, user_query, st.session_state["preferences"])
-        
-        elif intent == "information_request" and st.session_state.get("last_room_results"):
-            st.session_state["last_intent"] = "information_request"
-
-    # FAQ Dictionary
-            faq_responses = {
-        "Is cooking allowed?": "Yes, cooking is allowed.",
-        "Can I bring visitors?": "Yes, you can bring visitors, but please inform or seek permission before hosting anyone.",
-        "Is parking allowed?": "Yes, parking is allowed. Could you provide details like your vehicle's plate number?",
-        "What other charges besides rent?": "Besides rent, there are additional charges: Housekeeping ($30/month) and Aircon service ($60/quarter)."
-    }
-            info_prompt = """
-            You are Aba from Adobha Co-living, assisting a potential resident with housing inquiries.
-            Your goal is to provide clear, friendly, and helpful responses to FAQs and questions about available properties.
-
-            Frequently Asked Questions:
-            {faq_responses}
-
-            Guidelines:
-            - Answer frequently asked questions directly using the provided FAQ data.
-            - If a user asks about a previously discussed property, provide details in a natural, conversational manner.
-            - Use the Room Results to give accurate answers—avoid assumptions or incomplete responses.
-            - If certain details are unknown, politely offer to find out instead of making up information.
-            - Maintain a warm, helpful tone, as if you were a knowledgeable friend assisting in their housing search.
-            - Let the conversation flow naturally—only suggest next steps when it feels appropriate.
-            """
-            return generate_llm_response(
-                new_history,
-                user_query,
-                info_prompt,
-                chat_history=new_history,
-                user_query=user_query,
-                preferences=st.session_state["preferences"],
-                room_results=st.session_state["last_room_results"],
-                faq_responses=faq_responses
-            )
-        
-        # Handle step-based flow for new users
+            st.session_state["user_type"] = "new"
+            st.session_state["current_step"] = "collect_new_user_info"
+            # Welcome message for new users
+            response = "Welcome to Adobha Co-living! I'd be happy to help you find the perfect place to stay. Let me ask you a few questions to understand your preferences better.\n\nWhat is your rental duration? (Minimum 3 months)"
         else:
-            st.session_state["last_intent"] = None  # Reset last intent
+            # If unclear, ask again
+            response = "I'm not sure if you're an existing user or a new user. Could you please clarify?"
+    
+    # Handle existing user information collection
+    elif st.session_state["current_step"] == "collect_existing_user_info":
+        # Extract existing user info
+        extracted_info = extract_existing_user_info(st.session_state["chat_history"])
+        st.session_state["existing_user_info"].update(
+            {k: v for k, v in extracted_info.items() if v is not None}
+        )
+        
+        # Check if we have all required info
+        required_fields = ["address", "room number", "name", "problem"]
+        if all(st.session_state["existing_user_info"].get(field) for field in required_fields):
+            st.session_state["current_step"] = "handle_existing_user"
             
-            # Validate rental duration
-            rental_duration = st.session_state["preferences"].get("rental_duration")
-            if rental_duration and "month" in rental_duration.lower():
-                try:
-                    months = int(rental_duration.split()[0])
-                    if months < 3:
-                        st.session_state["preferences"]["rental_duration"] = None
-                        return "Could you kindly update your rental duration to a minimum of three months? We appreciate your understanding."
-                except ValueError:
-                    pass
-
-            # Step-based flow with dynamic prompts
-            if st.session_state["current_step"] == "step1_basic_details":
-                missing = [f for f in ["rental_duration", "pass_type", "move_in_date"] if st.session_state["preferences"][f] is None]
-                if missing:
-                    return generate_dynamic_prompt("step1_basic_details", st.session_state["preferences"], new_history, user_query)
-                st.session_state["current_step"] = "step2_room_preferences"
-                return generate_dynamic_prompt("step2_room_preferences", st.session_state["preferences"], new_history, user_query)
-
-            elif st.session_state["current_step"] == "step2_room_preferences":
-                missing = [f for f in ["washroom_preference", "occupants", "min_budget", "max_budget"] if st.session_state["preferences"][f] is None]
-                if missing:
-                    return generate_dynamic_prompt("step2_room_preferences", st.session_state["preferences"], new_history, user_query)
-                st.session_state["current_step"] = "step3_mrt_preferences"
-                st.session_state["mrt_sub_step"] = "choose_line"  # Initialize MRT sub-step
-                return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
-
-            elif st.session_state["current_step"] == "step3_mrt_preferences":
-                if st.session_state["mrt_sub_step"] == "choose_line":
-                    if st.session_state["preferences"].get("preferred_mrt_line"):
-                        st.session_state["mrt_sub_step"] = "choose_station"
-                        return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
-                    return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
-                
-                elif st.session_state["mrt_sub_step"] == "choose_station":
-                    if st.session_state["preferences"].get("preferred_mrt"):
-                        # Both MRT line and station are set—proceed to room search
-                        sql_query = generate_query_from_preferences(new_history, user_query)
-                        results = execute_query(sql_query)
-                        if results["status"] == "success" and results["data"]:
-                            st.session_state["last_room_results"] = results["data"]
-                            response = get_property_info_chain().invoke({"results": results["data"], "chat_history": chat_history, "question": user_query})
-                            return response + "\nThese rooms are available now—let me know if they work for your move-in plans!"
-                        else:
-                            relaxed_query = sql_query.replace(f"AND r.sellingprice BETWEEN {st.session_state['preferences']['min_budget']} AND {st.session_state['preferences']['max_budget']}", "")
-                            results = execute_query(relaxed_query)
-                            if results["status"] == "success" and results["data"]:
-                                st.session_state["last_room_results"] = results["data"]
-                                return f"No rooms match your budget, but here's what's close:\n" + get_property_info_chain().invoke({"results": results["data"], "chat_history": chat_history, "question": user_query})
-                            return "I couldn't find any rooms near your chosen MRT station. Want to adjust your budget or pick another station?"
-                    return generate_dynamic_prompt("step3_mrt_preferences", st.session_state["preferences"], new_history, user_query)
+            
+            response = "Thank you for providing your information. I've recorded your concern and will help address it. Is there anything specific you'd like to know about our policies or services in the meantime?"
+        else:
+            # Continue collecting info
+            response = collect_existing_user_info_chain().invoke({
+                "chat_history": st.session_state["chat_history"],
+                "question": user_query
+            })
     
-    # Default fallback response
-    return "I'm not sure how to help with that. Could you rephrase or provide more details?"
+    # Handle new user information collection
+    elif st.session_state["current_step"] == "collect_new_user_info":
+        # Extract preferences from conversation
+        extracted_preferences = extract_preferences(new_history)
+        st.session_state["preferences"].update(
+            {k: v for k, v in extracted_preferences.items() if v is not None}
+        )
+        
+        # Handle MRT line selection
+        if st.session_state["mrt_sub_step"] == "choose_line" and st.session_state["preferences"].get("preferred_mrt_line"):
+            st.session_state["mrt_sub_step"] = "choose_station"
+            mrt_stations = get_mrt_stations(st.session_state["preferences"]["preferred_mrt_line"])
+            response = f"Great! For the {st.session_state['preferences']['preferred_mrt_line']}, which station are you interested in? Options include: {', '.join(mrt_stations)}"
+            
+        # Check if we have all essential preferences
+        essential_fields = ["rental_duration", "pass_type", "washroom_preference", "occupants", "min_budget", "max_budget", "preferred_mrt"]
+        if all(st.session_state["preferences"].get(field) for field in essential_fields):
+            st.session_state["current_step"] = "search_properties"
+            
+            # Generate SQL query based on preferences
+            sql_query = generate_query_from_preferences(st.session_state["chat_history"], user_query)
+            logger.info(f"Generated SQL query: {sql_query}")
+            
+            # Execute query and get results
+            results = execute_query(sql_query)
+            st.session_state["last_room_results"] = results
+            
+            # Present results to user
+            if results["status"] == "success":
+                response = get_property_info_chain().invoke({
+                    "results": results["data"],
+                    "chat_history": st.session_state["chat_history"],
+                    "question": user_query
+                })
+            else:
+                response = results["message"]
+        else:
+            # Continue collecting preferences
+            response = collect_new_user_info_chain().invoke({
+                "chat_history": st.session_state["chat_history"],
+                "question": user_query
+            })
+    
+    # For users who have completed the initial information collection
+    elif st.session_state["current_step"] in ["handle_existing_user", "search_properties"]:
+        if intent == "property_search" and st.session_state["user_type"] == "new":
+            # Extract any new preferences mentioned
+            extracted_preferences = extract_preferences(st.session_state["chat_history"])
+            st.session_state["preferences"].update(
+                {k: v for k, v in extracted_preferences.items() if v is not None}
+            )
+            
+            # Generate SQL query based on updated preferences
+            sql_query = generate_query_from_preferences(st.session_state["chat_history"], user_query)
+            logger.info(f"Generated SQL query: {sql_query}")
+            
+            # Execute query and get results
+            results = execute_query(sql_query)
+            st.session_state["last_room_results"] = results
+            
+            # Present results to user
+            if results["status"] == "success":
+                response = get_property_info_chain().invoke({
+                    "results": results["data"],
+                    "chat_history": st.session_state["chat_history"],
+                    "question": user_query
+                })
+            else:
+                response = results["message"]
+        
+        elif intent == "information_request":
+            response = handle_faq_questions(user_query)
+        
+        elif intent == "viewing_request":
+            # Check if we already have a viewing in progress
+            if "viewing_details" not in st.session_state:
+                st.session_state["viewing_details"] = {
+                    "name": None,
+                    "phone": None,
+                    "date_time": None,
+                    "property_address": None
+                }
+                st.session_state["current_step"] = "collect_viewing_info"
+                response = "I'd be happy to schedule a viewing for you. First, could you please tell me your name?"
+            else:
+                response = handle_viewing_request(user_query)
+        
+        else:
+            # General conversation
+            response = generate_llm_response(
+                st.session_state["chat_history"], 
+                user_query,
+                "You are Aba from Adobha Co-living. Respond to the user's message: {user_query}"
+            )
+    
+    # Handle viewing request information collection
+    elif st.session_state["current_step"] == "collect_viewing_info":
+        response = handle_viewing_request(user_query)
+    
+    else:
+        # Fallback for any other state
+        response = generate_llm_response(
+            st.session_state["chat_history"], 
+            user_query,
+            "You are Aba from Adobha Co-living. Respond to the user's message: {user_query}"
+        )
+    
+    # Add assistant's response to chat history
+    st.session_state["chat_history"].append(AIMessage(content=response))
+    
+    return response
 
 
-def handle_viewing_request(chat_history, user_query, preferences):
+def handle_faq_questions(user_query):
     """
-    Handle viewing request with appropriate confirmation and context maintenance.
+    Handle FAQ questions about policies and services.
+    
+    Args:
+        user_query: The user's question
+        
+    Returns:
+        A response addressing the FAQ
     """
-    viewing_prompt = """
-    You are Aba from Adobha Co-living. You're handling a viewing request for a property.
+    # Define common FAQs and their answers
+    faqs = {
+        "cooking": "Yes, cooking is allowed in all our properties. Each unit is equipped with basic cooking facilities.",
+        "visitor": "Yes, you can bring visitors. However, please inform us or seek permission before hosting anyone overnight.",
+        "parking": "Yes, parking is available at most of our properties. Could you please share your vehicle plate number so we can arrange parking access?",
+        "charges": "Besides rent, there are a few additional charges:\n- Housekeeping: S$30 monthly\n- Air conditioning service: S$60 quarterly\n- Utilities are typically charged based on usage"
+    }
     
-    IMPORTANT RULES:
-    1. NEVER revert to listing properties after handling a viewing request
-    2. Stay focused on the viewing scheduling task
-    3. Keep responses conversational and natural
-    4. This is a VIEWING REQUEST - do not change the subject
+    # Use LLM to determine which FAQ the query relates to
+    template = """
+    Determine which category this question falls into:
+    - cooking (if about cooking, food preparation)
+    - visitor (if about guests, visitors)
+    - parking (if about parking, vehicles)
+    - charges (if about additional fees, costs beyond rent)
+    - other (if doesn't match any category)
     
-    Analyze the conversation and determine if the user has provided:
-    - Full name
-    - Phone number (valid Singapore format: +65 or 65 followed by 8 digits)
-    - Preferred date/time for viewing
+    User question: {user_query}
     
-    If all information is provided, confirm the viewing with all details:
-    "Here's what I've got: [name], [phone], [datetime]. Your viewing is scheduled at [property]. When you get there, just let me know you've arrived!"
-    
-    If information is missing, acknowledge what's been provided and ask for the missing details.
-    
-    For phone numbers, validate they follow Singapore format (+65 or 65 + 8 digits).
-    
-    Chat History: {chat_history}
-    User Query: {user_query}
-    Preferences: {preferences}
+    Category (just the category word):
     """
     
-    # Get building name from preferences or last room results
-    building_name = None
-    if "last_room_results" in st.session_state and st.session_state["last_room_results"]:
-        if "BuildingName" in st.session_state["last_room_results"][0]:
-            building_name = st.session_state["last_room_results"][0]["BuildingName"]
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatOpenAI(model="gpt-4o-mini")
+    chain = prompt | llm | StrOutputParser()
     
-    property_address = f"{building_name if building_name else 'the property you are interested in'}"
+    category = chain.invoke({"user_query": user_query}).strip().lower()
     
-    return generate_llm_response(
-        chat_history, 
-        user_query, 
-        viewing_prompt,
-        preferences=preferences,
-        property_address=property_address
-    )
+    if category in faqs:
+        return faqs[category]
+    else:
+        # For questions not covered in the FAQs
+        return generate_llm_response(
+            st.session_state["chat_history"],
+            user_query,
+            "You are Aba from Adobha Co-living. Answer the user's question about our policies or services. Be helpful and informative: {user_query}"
+        )
+
+
+def handle_viewing_request(user_query):
+    viewing_details = st.session_state.get("viewing_details", {})
+    
+    # Collect name if not present
+    if not viewing_details.get("name"):
+        # Extract name from user query
+        name_template = "Extract only the person's name from this text: {user_query}"
+        name = generate_llm_response([], user_query, name_template)
+        
+        if name and len(name.split()) >= 1:
+            viewing_details["name"] = name
+            st.session_state["viewing_details"] = viewing_details
+            return "Thank you! Now, could you please provide your phone number? We need a valid Singapore number to contact you."
+        else:
+            return "I didn't catch your name. Could you please tell me your name for the viewing appointment?"
+    
+    # Collect phone number if not present
+    elif not viewing_details.get("phone"):
+        # Extract and validate Singapore phone number
+        phone_match = re.search(r'(\+65)?\s*[689]\d{7}', user_query)
+        
+        if phone_match:
+            phone = phone_match.group(0)
+            # Standardize format
+            phone = re.sub(r'[^\d]', '', phone)
+            if not phone.startswith('65') and len(phone) == 8:
+                phone = '65' + phone
+            
+            viewing_details["phone"] = phone
+            st.session_state["viewing_details"] = viewing_details
+            
+            # If we have property results, ask which one they want to view
+            if st.session_state.get("last_room_results", {}).get("status") == "success":
+                properties = st.session_state["last_room_results"]["data"]
+                property_list = "\n".join([f"{i+1}. {prop.get('BuildingName', 'Property')} near {prop.get('NearestMRT', 'MRT')}" 
+                                          for i, prop in enumerate(properties[:5])])
+                return f"Great! Which property would you like to view?\n\n{property_list}\n\nPlease select by number or name."
+            else:
+                return "Thank you! Which property location are you interested in viewing?"
+        else:
+            return "I need a valid Singapore phone number starting with +65 Could you please provide a valid phone number?"
+    
+    # Collect property address if not present
+    elif not viewing_details.get("property_address"):
+        # Try to extract which property they want to view
+        property_index = None
+        
+        # Check if they selected by number
+        number_match = re.search(r'\b[1-5]\b', user_query)
+        if number_match and st.session_state.get("last_room_results", {}).get("status") == "success":
+            property_index = int(number_match.group(0)) - 1
+            properties = st.session_state["last_room_results"]["data"]
+            if 0 <= property_index < len(properties):
+                viewing_details["property_address"] = properties[property_index].get("BuildingName", "Property")
+            
+        # If no number found or invalid, extract property name using LLM
+        if not viewing_details.get("property_address"):
+            property_template = """
+            Based on the user's response, which property are they interested in viewing?
+            If there's no clear property mentioned, respond with "unclear".
+            User response: {user_query}
+            """
+            property_name = generate_llm_response([], user_query, property_template)
+            
+            if property_name.lower() != "unclear":
+                viewing_details["property_address"] = property_name
+        
+        if viewing_details.get("property_address"):
+            st.session_state["viewing_details"] = viewing_details
+            return "When would you like to schedule the viewing? Please provide a date and time that works for you."
+        else:
+            return "I'm not sure which property you'd like to view. Could you please specify the building name or provide more details about the location?"
+    
+    # Collect date and time if not present
+    elif not viewing_details.get("date_time"):
+        # Extract date and time from user query
+        datetime_template = """
+        Extract the date and time for a viewing appointment from this text. 
+        Format as: Day, DD Month at HH:MM AM/PM
+        If unclear, respond with "unclear".
+        Text: {user_query}
+        """
+        date_time = generate_llm_response([], user_query, datetime_template)
+        
+        if date_time.lower() != "unclear":
+            viewing_details["date_time"] = date_time
+            st.session_state["viewing_details"] = viewing_details
+            
+            # Confirmation message with all details
+            confirmation = f"""
+            Great! I've scheduled your viewing appointment with the following details:
+            
+            Name: {viewing_details['name']}
+            Phone: {viewing_details['phone']}
+            Property: {viewing_details['property_address']}
+            Date & Time: {viewing_details['date_time']}
+            
+            Our property manager will contact you to confirm this appointment. Is there anything else you'd like to know about the property or the viewing process?
+            """
+            
+            # Reset the viewing request process for future requests
+            st.session_state["current_step"] = "search_properties"
+            return confirmation
+        else:
+            return "I couldn't understand the date and time. Could you please provide it in a format like 'Monday, 25 March at 3:00 PM'?"
+    
+    # Fallback
+    else:
+        return "I have all the information I need for your viewing request. Is there anything else you'd like to know?"
+    
+
 
 # Custom CSS with fixed sidebar visibility
 custom_css = """
