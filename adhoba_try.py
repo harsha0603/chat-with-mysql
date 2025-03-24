@@ -89,6 +89,17 @@ if "current_step" not in st.session_state:
     st.session_state["current_step"] = "identify_user"
 if "mrt_sub_step" not in st.session_state:
     st.session_state["mrt_sub_step"] = "choose_line"
+if "mrt_stations" not in st.session_state:
+    st.session_state["mrt_stations"] = [] 
+if "current_mrt_index" not in st.session_state:
+    st.session_state["current_mrt_index"] = 0  
+if "last_llm_query" not in st.session_state:
+    st.session_state["last_llm_query"] = ""  
+if "last_modified_query" not in st.session_state:
+    st.session_state["last_modified_query"] = ""  
+if "max_budget" not in st.session_state:
+    st.session_state["max_budget"] = 0  
+
 
 # Database setup
 @st.cache_resource
@@ -610,6 +621,65 @@ def generate_llm_response(chat_history, user_query, prompt_template, **kwargs):
     response = chain.invoke(variables)
     return response
 
+import re
+import streamlit as st
+
+def modify_query_for_new_mrt(original_query, new_mrt_station):
+    """Dynamically replaces the MRT station in the LLM-generated query."""
+    
+    pattern = r"(p\.nearestmrt\s*=\s*')([^']+)(')"
+    modified_query = re.sub(pattern, fr"\1{new_mrt_station}\3", original_query)
+
+    logger.info(f"Modified query for new MRT station: {new_mrt_station}")
+    return modified_query
+
+def modify_query_for_budget(original_query, new_max_budget):
+    """Dynamically increases the max budget in the query."""
+    
+    pattern = r"(r\.sellingprice\s*<=\s*)(\d+)"
+    modified_query = re.sub(pattern, fr"\1{new_max_budget}", original_query)
+
+    logger.info(f"Relaxing budget: New Max Budget = {new_max_budget}")
+    return modified_query
+
+
+def fallback_logic():
+    """Tries alternative MRT stations first, then relaxes budget if needed."""
+    
+    mrt_stations = st.session_state.get("mrt_stations", [])
+    current_mrt_index = st.session_state.get("current_mrt_index", 0)
+    last_query = st.session_state.get("last_modified_query", st.session_state.get("last_llm_query"))  
+    max_budget = st.session_state.get("max_budget") 
+    budget_step = 500  
+
+    if current_mrt_index + 1 < len(mrt_stations):
+        next_station = mrt_stations[current_mrt_index + 1]
+        st.session_state["current_mrt_index"] += 1
+
+        logger.info(f"Fallback: Trying next MRT station: {next_station}")
+
+        modified_query = modify_query_for_new_mrt(last_query, next_station)
+        st.session_state["last_modified_query"] = modified_query  # Store modified query
+
+        results = execute_query(modified_query)
+        if results["status"] == "success" and results["data"]:
+            return {"status": "success", "data": results["data"]}
+    if max_budget:
+        new_budget = max_budget + budget_step  # Increase budget
+        st.session_state["max_budget"] = new_budget  # Update session
+
+        logger.info(f"Fallback: Relaxing budget to {new_budget}")
+
+        modified_query = modify_query_for_budget(last_query, new_budget)
+        st.session_state["last_modified_query"] = modified_query  # Store modified query
+
+        results = execute_query(modified_query)
+        if results["status"] == "success" and results["data"]:
+            return {"status": "success", "data": results["data"]}
+
+    return {"status": "fail", "message": "No alternative properties found."}
+
+
 def classify_intent(chat_history, user_query):
     template = """
     Classify the intent: 
@@ -708,6 +778,7 @@ def get_response(user_query: str, chat_history: list):
             # Generate SQL query based on preferences
             sql_query = generate_query_from_preferences(st.session_state["chat_history"], user_query)
             logger.info(f"Generated SQL query: {sql_query}")
+            st.session_state["last_llm_query"] = sql_query
             
             # Execute query and get results
             results = execute_query(sql_query)
@@ -746,15 +817,22 @@ def get_response(user_query: str, chat_history: list):
             results = execute_query(sql_query)
             st.session_state["last_room_results"] = results
             
-            # Present results to user
-            if results["status"] == "success":
+            if results["status"] == "success" and results["data"]:
                 response = get_property_info_chain().invoke({
-                    "results": results["data"],
+                "results": results["data"],
+                "chat_history": st.session_state["chat_history"],
+                "question": user_query
+            })
+            else:
+                fallback_results = fallback_logic(st.session_state["preferences"])
+                if fallback_results["status"] == "success" and fallback_results["data"]:
+                    response = get_property_info_chain().invoke({
+                    "results": fallback_results["data"],
                     "chat_history": st.session_state["chat_history"],
                     "question": user_query
                 })
-            else:
-                response = results["message"]
+                else:
+                    response = fallback_results["message"]
         
         elif intent == "information_request":
             response = handle_faq_questions(user_query)
