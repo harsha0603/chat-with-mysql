@@ -245,37 +245,44 @@ def get_mrt_stations(mrt_line):
         "east-west line": "EW",
         "downtown line": "DT",
         "north south line": "NS",
-        "circle line": "CC",
-        "northeast line": "NE",
         "thomson-east coast line": "TE"
     }
 
-    mrt_line_key = mrt_line.lower() if isinstance(mrt_line, str) else mrt_line
+    mrt_line_key = mrt_line.lower().strip() if isinstance(mrt_line, str) else mrt_line
     mrt_line_code = mrt_line_mappings.get(mrt_line_key, mrt_line_key) if mrt_line_key else "%"
 
     # Handle both bracketed and non-bracketed formats
     pattern = f"%({mrt_line_code})%"  # Bracketed format
-    pattern_alt = f"% {mrt_line_code}%"  # Non-bracketed format
+    pattern_alt = f"% {mrt_line_code}%"  # Space-separated format
+    pattern_mixed = f"%{mrt_line_code}%"  # No space or bracket format
 
     query = """
-SELECT DISTINCT p.nearestmrt 
-FROM properties p 
-JOIN rooms r ON r.propertyid = p.propertyid 
-WHERE (p.nearestmrt LIKE :pattern OR p.nearestmrt LIKE :pattern_alt)
-  AND r.occupancystatus IN ('Vacant', 'Available Soon', 'Available Immediately') 
-  AND r.sellingprice > 0
-  AND p.status = 'a'
-ORDER BY p.nearestmrt
-"""
-
+    SELECT DISTINCT p.nearestmrt 
+    FROM properties p 
+    JOIN rooms r ON r.propertyid = p.propertyid 
+    WHERE (
+          LOWER(TRIM(p.nearestmrt)) LIKE :pattern
+       OR LOWER(TRIM(p.nearestmrt)) LIKE :pattern_alt
+       OR LOWER(TRIM(p.nearestmrt)) LIKE :pattern_mixed
+    )
+      AND r.occupancystatus IN ('Vacant', 'Available Soon', 'Available Immediately') 
+      AND r.sellingprice > 0
+      AND p.status = 'a'
+    ORDER BY p.nearestmrt
+    """
 
     try:
         with engine.connect() as conn:
-            result = conn.execute(text(query), {"pattern": pattern, "pattern_alt": pattern_alt}).fetchall()
+            result = conn.execute(text(query), {
+                "pattern": pattern.lower(),
+                "pattern_alt": pattern_alt.lower(),
+                "pattern_mixed": pattern_mixed.lower()
+            }).fetchall()
             return [row[0] for row in result] if result else []
     except Exception as e:
         logger.error(f"Error fetching MRT stations: {e}")
         return []
+
 
 
 def extract_preferences(chat_history):
@@ -494,7 +501,6 @@ Then, for each room, include:
 - Nearest MRT
 - Rent
 - Amenities (list as bullet points, e.g., - Aircon: Yes)
-- Available from (if not provided, say "Available soon")
 Use bullet points for each room. After listing, ask: "Would you like to schedule a viewing for any of these?"
 Do not mention the <RESULTS> tags.
 
@@ -530,16 +536,14 @@ Ask the following questions one by one:
 6. "What is your budget range? (Please provide min and max budget)"
 
 7. "Which MRT Line are you interested in?"
-   - Provide options: East-West Line (EW), Downtown Line (DT), North-South Line (NS), Circle Line (CC), North-East Line (NE), Thomson-East Coast Line (TE).
+   - Provide options: East-West Line (EW), Downtown Line (DT), North-South Line (NS), Thomson-East Coast Line (TE).
    - Store the response as preferred_mrt_line.
 
 8. "Which station do you prefer?"
    - Based on the selected MRT line, show relevant stations:
-     - EW: Kembangan, Simei, Chinese Garden, Eunos, Pasir Ris
-     - DT: Upper Changi, Cashew, Hume, Mountbatten
+     - EW: Simei, Chinese Garden, Eunos,
+     - DT: Upper Changi, Cashew,
      - NS: Admiralty, Novena, Orchard, Yio Chu Kang, Yew Tee
-     - CC: Nicoll Highway, Holland Village, Mountbatten
-     - NE: Woodleigh
      - TE: Lentor, Upper Changi East
    - Store the response as preferred_mrt.
 
@@ -593,8 +597,30 @@ def generate_llm_response(chat_history, user_query, prompt_template, **kwargs):
     response = chain.invoke(variables)
     return response
 
-import re
-import streamlit as st
+def collect_existing_user_info_chain():
+    template = """
+    Collect the following details from the user step by step:
+    - Address
+    - Room Number
+    - Name
+    - Phone Number
+    - Issue they are facing
+
+    Ensure the conversation remains respectful and acknowledge the user once all details are collected. 
+    Confirm that their issue will be resolved as soon as possible.
+
+    Conversation History:
+    {chat_history}
+
+    User’s Message:
+    {question}
+
+    Response:
+    """
+    prompt = ChatPromptTemplate.from_template(template)
+    llm = ChatOpenAI(model="gpt-4o-mini")
+    return prompt | llm | StrOutputParser()
+
 
 def modify_query_for_new_mrt(original_query, new_mrt_station):
     """Dynamically replaces the MRT station in the LLM-generated query."""
@@ -772,10 +798,13 @@ def get_response(user_query: str, chat_history: list):
                 # Process results
                 if results["status"] == "success" and results["data"]:
                     response = get_property_info_chain().invoke({
-                        "results": results["data"],
-                        "chat_history": st.session_state["chat_history"],
-                        "question": user_query
-                    })
+                    "results": results["data"],
+                    "chat_history": st.session_state.get("chat_history", []),
+                    "question": user_query,
+                    "preferred_mrt": st.session_state.get("preferred_mrt", "Not provided"),
+                    "mrt_line": st.session_state.get("mrt_line", "Not provided")
+})
+
                 else:
                     logger.info("Triggering fallback logic due to no matching properties in initial search.")
                     fallback_results = fallback_logic(st.session_state["preferences"])
@@ -797,6 +826,7 @@ def get_response(user_query: str, chat_history: list):
                 response = collect_new_user_info_chain().invoke({
                     "chat_history": st.session_state["chat_history"],
                     "question": user_query
+                    
                 })
     
     
@@ -822,7 +852,9 @@ def get_response(user_query: str, chat_history: list):
                 response = get_property_info_chain().invoke({
                     "results": results["data"],
                     "chat_history": st.session_state["chat_history"],
-                    "question": user_query
+                    "question": user_query,
+                    "preferred_mrt": st.session_state.get("preferred_mrt", "Not provided"),
+                    "mrt_line": st.session_state.get("mrt_line", "Not provided")
                 })
             else:  # Covers both "no_matches" and "error"
                 logger.info("Triggering fallback logic due to no matching properties.")
@@ -938,27 +970,50 @@ RESPONSE: <response text>
 
     return response
 
-
 def extract_and_schedule_viewing(user_query):
-    # Retrieve last search results
+    # Retrieve last search results and chat history
     room_results = st.session_state.get("last_room_results", {})
     viewing_details = st.session_state.get("viewing_details", {})
+    chat_history = st.session_state.get("chat_history", [])
 
+    # Build property list from room_results
     if room_results.get("status") == "success" and room_results.get("data"):
         properties = room_results["data"][:5]
         property_list = "\n".join([
-            f"- {prop.get('BuildingName', 'Unknown')} near {prop.get('NearestMRT', 'MRT')} (Rent: ${prop.get('Rent', 'N/A')})"
-            for prop in properties
+            f"{i+1}. {prop.get('BuildingName', 'Unknown')} near {prop.get('NearestMRT', 'MRT')} (Rent: ${prop.get('Rent', 'N/A')})"
+            for i, prop in enumerate(properties)
         ])
         results_context = f"Available properties:\n{property_list}"
     else:
         results_context = "No recent search results available. Please search for rooms first."
 
-    # Define LLM-driven extraction prompt
+    # Format chat history for the prompt using LangChain message attributes
+    history_str = ""
+    if chat_history:
+        for msg in chat_history[-5:]:
+            role = "user" if msg.__class__.__name__ == "HumanMessage" else "assistant"
+            content = getattr(msg, "content", "Unknown message content")
+            history_str += f"{role}: {content}\n"
+
+    # Fetch property address if selected_property exists
+    property_address = viewing_details.get("property_address", "Not available")
+    if "selected_property" in viewing_details and viewing_details["selected_property"] != "Not provided":
+        property_name = viewing_details["selected_property"]
+        address_query = f"SELECT add1 FROM properties WHERE BuildingName = '{property_name}' LIMIT 1"
+        address_result = execute_query(address_query)
+        property_address = (address_result["data"][0]["add1"]
+                            if address_result["status"] == "success" and address_result["data"]
+                            else "Address not available")
+        viewing_details["property_address"] = property_address
+
+    # Updated LLM prompt with automatic address inclusion
     template = """
 You are Aba from Adobha Co-living. Your task is to extract details from the user's request for a viewing appointment and ask for any missing details in a conversational manner.
 
 ---
+
+### **Chat History (Recent Messages):**
+{history_str}
 
 ### **User Query:**
 {user_query}
@@ -966,7 +1021,7 @@ You are Aba from Adobha Co-living. Your task is to extract details from the user
 ### **Context (Available Properties):**
 {results_context}
 
-### **Current Details (Extracted so far):**
+### **Current Details:**
 - Name: {name}
 - Phone: {phone}
 - Date & Time: {date_time}
@@ -976,73 +1031,79 @@ You are Aba from Adobha Co-living. Your task is to extract details from the user
 ---
 
 ### **Instructions:**
-1. **Check if this is the first interaction.**
-   - If the user simply says "yes" or something vague, ask:
-     **"Which property are you interested in?"** (List available properties if needed).
+1. **Use the Chat History:** Refer to previous messages to understand the context (e.g., if properties were listed before and the user responded with a number).
 
-2. **Extract and store details as they are provided:**
-   - **Property Name:** If mentioned, extract it.
-   - **Name:** Extract if given.
-   - **Phone:** Extract and format as "+65XXXXXXXX".
-   - **Date & Time:** Extract and format as "Monday, 25 March at 3:00 PM"; if unclear, return "unclear".
+2. **Update the details based on the user's query:**
+   - If the user provides a number (e.g., "1", "2"), interpret it as selecting the corresponding property from the list in "Context (Available Properties)" and update Selected Property with the building name (e.g., "Changi Court").
+   - If the user provides a name, update Name.
+   - If the user provides a phone number, update Phone and format it as "+65XXXXXXXX".
+   - If the user provides a date and time, update Date & Time and format it as "Monday, 27 March at 7:00 PM". If unclear, set to "unclear".
+   - For any detail not provided in this query, keep the current value as is.
+   - Do NOT ask the user for the Property Address; use the provided Property Address value from the Current Details.
 
-3. **Ask only for missing details (one at a time):**
-   - If **property name** is missing: Ask **"Which property are you interested in?"**  
-   - If **name** is missing: Ask **"May I have your name?"**  
-   - If **phone** is missing: Ask **"Can you share your phone number?"**  
-   - If **date & time** is missing: Ask **"When would you like to schedule the viewing?"**  
+3. **Determine the next step:**
+   - If Selected Property is "Not provided" and the user hasn’t picked a number, ask: "Which property are you interested in?" and list the properties with numbered options (e.g., "1. Changi Court...").
+   - If Name is "Not provided", ask: "May I have your name?"
+   - If Phone is "Not provided", ask: "Can you share your phone number?"
+   - If Date & Time is "Not provided" or "unclear", ask: "When would you like to schedule the viewing?"
+   - If all details (Name, Phone, Date & Time, Selected Property) are provided and not "Not provided" or "unclear", confirm the viewing with all details, including the Property Address from the Current Details.
 
-4. **Once all details are collected, fetch the property address** (if the property name is known).  
-   - If no address is found, return **"Address not available."**
+4. **Provide your response in the following format:**
 
-5. **When all details are confirmed, respond with:**
-Thank you! Your viewing is scheduled:
+EXTRACTED:
+Name: [updated name]
+Phone: [updated phone]
+Date & Time: [updated date and time]
+Selected Property: [updated selected property]
 
-Name: {name}
+RESPONSE:
+[your response text]
 
-Phone: {phone}
+---
 
-Date & Time: {date_time}
-
-Property: {property_name}
-
-Address: {property_address}
-Our team will contact you for confirmation. Thank you for using Adobha services!
+### **Notes:**
+- If the user says "yes" or something vague without new details, assume they’re confirming interest and ask for the next missing detail.
+- If the user picks a number (e.g., "1"), map it to the property list (e.g., "1" → first property).
+- For confirmation, use:
+  "Thank you! Your viewing is scheduled:\nName: [name]\nPhone: [phone]\nDate & Time: [date_time]\nProperty: [property_name]\nAddress: [property_address]\nOur team will contact you for confirmation. Thank you for using Adobha services!"
+- Do NOT ask the user to provide or confirm the address; assume the Property Address in Current Details is correct and include it in the confirmation.
 """
 
-
-    # Run prompt through LLM 
+    # Run prompt through LLM
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatOpenAI(model="gpt-4o-mini")
     chain = prompt | llm | StrOutputParser()
 
     result = chain.invoke({
+        "history_str": history_str,
         "user_query": user_query,
         "results_context": results_context,
         "name": viewing_details.get("name", "Not provided"),
         "phone": viewing_details.get("phone", "Not provided"),
         "date_time": viewing_details.get("date_time", "Not provided"),
         "property_name": viewing_details.get("selected_property", "Not provided"),
-        "property_address": viewing_details.get("property_address", "Not available")
-
+        "property_address": property_address
     })
 
     # Extract structured details from LLM response
     try:
-        extracted_data, response_text = result.strip().split("\n\nRESPONSE:\n", 1)
-        for line in extracted_data.replace("EXTRACTED:\n", "").split("\n"):
-            key, value = line.split(": ", 1)
-            if key == "Phone":
-                value = re.sub(r'[^\d]', '', value)
-                if not value.startswith("65") and len(value) == 8:
-                    value = "65" + value
-            viewing_details[key.lower().replace(" ", "_")] = value
+        extracted_part, response_part = result.strip().split("\n\nRESPONSE:\n", 1)
+        extracted_data = extracted_part.replace("EXTRACTED:\n", "").strip()
+        response_text = response_part.strip()
 
-        st.session_state["viewing_details"] = viewing_details
+        # Update viewing_details with extracted data
+        for line in extracted_data.split("\n"):
+            if ": " in line:
+                key, value = line.split(": ", 1)
+                if key == "Phone" and value != "Not provided":
+                    value = re.sub(r'[^\d]', '', value)
+                    if not value.startswith("65") and len(value) == 8:
+                        value = "+65" + value
+                viewing_details[key.lower().replace(" ", "_")] = value
 
-        # Fetch property address
-        if "property_name" in viewing_details:
-            property_name = viewing_details["property_name"]
+        # Ensure property_address is updated in viewing_details after extraction
+        if viewing_details.get("selected_property") != "Not provided":
+            property_name = viewing_details["selected_property"]
             address_query = f"SELECT add1 FROM properties WHERE BuildingName = '{property_name}' LIMIT 1"
             address_result = execute_query(address_query)
             property_address = (address_result["data"][0]["add1"]
@@ -1050,13 +1111,12 @@ Our team will contact you for confirmation. Thank you for using Adobha services!
                                 else "Address not available")
             viewing_details["property_address"] = property_address
 
+        st.session_state["viewing_details"] = viewing_details
         return response_text
 
     except Exception as e:
         logger.error(f"Unexpected response format: {result}, Error: {e}")
         return "I’m having trouble processing this. Could you please provide your details again?"
-
-
 
 # Custom CSS with fixed sidebar visibility
 custom_css = """
