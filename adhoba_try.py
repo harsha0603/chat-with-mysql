@@ -722,6 +722,7 @@ def classify_intent(chat_history, user_query):
 def get_response(user_query: str, chat_history: list):
     new_history = chat_history + [HumanMessage(content=user_query)]
 
+    # Classify intent
     chain = classify_intent(st.session_state["chat_history"], user_query)
     intent = chain.invoke({
         "chat_history": st.session_state["chat_history"],
@@ -730,12 +731,27 @@ def get_response(user_query: str, chat_history: list):
 
     logger.info(f"Classified intent: {intent}")
     
-    # Check if we're in the process of identifying user type
-    if st.session_state["current_step"] == "identify_user":
-        # Determine if user is new or existing
+    # Default response to ensure it’s always defined
+    response = None
+
+    # Handle information_request first to allow interruptions
+    if intent == "information_request":
+        response = handle_faq_questions(user_query)
+        if st.session_state.get("current_step") == "collect_viewing_info":
+            viewing_details = st.session_state.get("viewing_details", {})
+            if viewing_details.get("selected_property") == "Not provided":
+                response += "\n\nNow, back to scheduling: Which property would you like to view?"
+            elif viewing_details.get("name") == "Not provided":
+                response += "\n\nNow, back to scheduling: May I have your name?"
+            elif viewing_details.get("phone") == "Not provided":
+                response += "\n\nNow, back to scheduling: Can you share your phone number? (e.g., +65XXXXXXXX)"
+            elif viewing_details.get("date_time") == "Not provided":
+                response += "\n\nNow, back to scheduling: When would you like to schedule the viewing? (e.g., 15 Oct 2025, 2 PM)"
+
+    # Check current step for ongoing processes
+    elif st.session_state.get("current_step") == "identify_user":
         user_type = classify_user_type(st.session_state["chat_history"], user_query).strip().lower()
         logger.info(f"User type classified as: {user_type}")
-        
         if user_type == "existing":
             st.session_state["user_type"] = "existing"
             st.session_state["current_step"] = "collect_existing_user_info"
@@ -749,14 +765,12 @@ def get_response(user_query: str, chat_history: list):
             response = "Welcome to Adobha Co-living! I'd be happy to help you find the perfect place to stay. Let me ask you a few questions to understand your preferences better.\n\nWhat is your rental duration? (Minimum 3 months)"
         else:
             response = "I'm not sure if you're an existing user or a new user. Could you please clarify?"
-    
-    # Handle existing user information collection
-    elif st.session_state["current_step"] == "collect_existing_user_info":
+
+    elif st.session_state.get("current_step") == "collect_existing_user_info":
         extracted_info = extract_existing_user_info(st.session_state["chat_history"])
         st.session_state["existing_user_info"].update(
             {k: v for k, v in extracted_info.items() if v is not None}
         )
-        
         required_fields = ["address", "room number", "name", "problem"]
         if all(st.session_state["existing_user_info"].get(field) for field in required_fields):
             st.session_state["current_step"] = "handle_existing_user"
@@ -766,88 +780,64 @@ def get_response(user_query: str, chat_history: list):
                 "chat_history": st.session_state["chat_history"],
                 "question": user_query
             })
-    
-    # Handle new user information collection
-    elif st.session_state["current_step"] == "collect_new_user_info":
-        # Extract preferences from conversation
+
+    elif st.session_state.get("current_step") == "collect_new_user_info":
         extracted_preferences = extract_preferences(new_history)
         st.session_state["preferences"].update(
             {k: v for k, v in extracted_preferences.items() if v is not None}
         )
-        
-        if st.session_state["mrt_sub_step"] == "choose_line" and st.session_state["preferences"].get("preferred_mrt_line"):
+        if st.session_state.get("mrt_sub_step") == "choose_line" and st.session_state["preferences"].get("preferred_mrt_line"):
             st.session_state["mrt_sub_step"] = "choose_station"
             st.session_state["mrt_stations"] = get_mrt_stations(st.session_state["preferences"]["preferred_mrt_line"])
             logger.info(f"Stored MRT stations: {st.session_state['mrt_stations']}")
             response = f"Great! For the {st.session_state['preferences']['preferred_mrt_line']}, which station are you interested in? Options include: {', '.join(st.session_state['mrt_stations'])}"
         else:
-            # Check if we have all essential preferences
             essential_fields = ["rental_duration", "pass_type", "washroom_preference", "occupants", "min_budget", "max_budget", "preferred_mrt"]
             if all(st.session_state["preferences"].get(field) for field in essential_fields):
                 st.session_state["current_step"] = "search_properties"
-                
-                # Generate SQL query based on preferences
                 sql_query = generate_query_from_preferences(st.session_state["chat_history"], user_query)
                 logger.info(f"Generated SQL query: {sql_query}")
                 st.session_state["last_llm_query"] = sql_query
-                
-                # Execute query and get results
                 results = execute_query(sql_query)
                 st.session_state["last_room_results"] = results
-                
-                # Process results
                 if results["status"] == "success" and results["data"]:
                     response = get_property_info_chain().invoke({
-                    "results": results["data"],
-                    "chat_history": st.session_state.get("chat_history", []),
-                    "question": user_query,
-                    "preferred_mrt": st.session_state.get("preferred_mrt", "Not provided"),
-                    "mrt_line": st.session_state.get("mrt_line", "Not provided")
-})
-
+                        "results": results["data"],
+                        "chat_history": st.session_state.get("chat_history", []),
+                        "question": user_query,
+                        "preferred_mrt": st.session_state.get("preferred_mrt", "Not provided"),
+                        "mrt_line": st.session_state.get("mrt_line", "Not provided")
+                    })
                 else:
                     logger.info("Triggering fallback logic due to no matching properties in initial search.")
                     fallback_results = fallback_logic(st.session_state["preferences"])
-                    logger.info(f"Fallback results: {fallback_results}")
                     if fallback_results["status"] == "success" and fallback_results["data"]:
-                        logger.info("Processing successful fallback results")
                         response = get_property_info_chain().invoke({
-                        "results": fallback_results["data"],
-                        "chat_history": st.session_state["chat_history"],
-                        "question": user_query,
-                        "preferred_mrt": st.session_state["preferences"].get("preferred_mrt", "the specified location"),
-                        "mrt_line": st.session_state["preferences"].get("preferred_mrt_line", "the MRT line")
-            })
+                            "results": fallback_results["data"],
+                            "chat_history": st.session_state["chat_history"],
+                            "question": user_query,
+                            "preferred_mrt": st.session_state["preferences"].get("preferred_mrt", "the specified location"),
+                            "mrt_line": st.session_state["preferences"].get("preferred_mrt_line", "the MRT line")
+                        })
                     else:
                         preferred_mrt = st.session_state["preferences"].get("preferred_mrt", "the specified location")
                         response = f"I couldn’t find any rooms matching your preferences at {preferred_mrt}. {fallback_results['message']}"
             else:
-                # Continue collecting preferences
                 response = collect_new_user_info_chain().invoke({
                     "chat_history": st.session_state["chat_history"],
                     "question": user_query
-                    
                 })
-    
-    
-    # For users who have completed the initial information collection
-    elif st.session_state["current_step"] in ["handle_existing_user", "search_properties"]:
-        if intent == "property_search" and st.session_state["user_type"] == "new":
-            # Extract any new preferences mentioned
+
+    elif st.session_state.get("current_step") in ["handle_existing_user", "search_properties"]:
+        if intent == "property_search" and st.session_state.get("user_type") == "new":
             extracted_preferences = extract_preferences(st.session_state["chat_history"])
             st.session_state["preferences"].update(
                 {k: v for k, v in extracted_preferences.items() if v is not None}
             )
-            
-            # Generate SQL query based on updated preferences
             sql_query = generate_query_from_preferences(st.session_state["chat_history"], user_query)
             logger.info(f"Generated SQL query: {sql_query}")
-            
-            # Execute query and get results
             results = execute_query(sql_query)
             st.session_state["last_room_results"] = results
-            logger.info(f"Query results: status={results['status']}, data={results.get('data')}")  # Debug log
-            
             if results["status"] == "success":
                 response = get_property_info_chain().invoke({
                     "results": results["data"],
@@ -856,119 +846,105 @@ def get_response(user_query: str, chat_history: list):
                     "preferred_mrt": st.session_state.get("preferred_mrt", "Not provided"),
                     "mrt_line": st.session_state.get("mrt_line", "Not provided")
                 })
-            else:  # Covers both "no_matches" and "error"
+            else:
                 logger.info("Triggering fallback logic due to no matching properties.")
                 fallback_results = fallback_logic(st.session_state["preferences"]) or {"status": "fail", "data": None, "message": "Couldn't find any alternative properties."}
                 if fallback_results["status"] == "success" and fallback_results["data"]:
-                    logger.info(f"Fallback results: {fallback_results}")
                     response = get_property_info_chain().invoke({
                         "results": fallback_results["data"],
                         "chat_history": st.session_state["chat_history"],
                         "question": user_query
                     })
                 else:
-                    response = results["message"] + " " + fallback_results["message"]       
-        
+                    response = results["message"] + " " + fallback_results["message"]
         elif intent == "viewing_request":
-            # Check if we already have a viewing in progress
             if "viewing_details" not in st.session_state:
                 st.session_state["viewing_details"] = {
-                "name": "Not provided",
-                "phone": "Not provided",
-                "date_time": "Not provided",
-                "selected_property": "Not provided",
-                "property_address": "Not available"
-            }
-        st.session_state["current_step"] = "collect_viewing_info"
-        response = extract_and_schedule_viewing(user_query)
+                    "name": "Not provided",
+                    "phone": "Not provided",
+                    "date_time": "Not provided",
+                    "selected_property": "Not provided",
+                    "property_address": "Not available"
+                }
+            st.session_state["current_step"] = "collect_viewing_info"
+            response = extract_and_schedule_viewing(user_query)
 
     elif st.session_state.get("current_step") == "collect_viewing_info":
         response = extract_and_schedule_viewing(user_query)
 
-    elif intent == "information_request":
-        response = handle_faq_questions(user_query)
-
-    else:
+    # Catch-all default case
+    if response is None:
+        logger.warning(f"No specific response set for intent '{intent}' and step '{st.session_state.get('current_step')}'. Falling back to general response.")
         response = generate_llm_response(
             st.session_state["chat_history"],
             user_query,
-            "You are Aba from Adobha Co-living. Respond to the user's message: {user_query}"
+            "You are Aba from Adobha Co-living. I’m not sure how to assist you right now. How can I help you?"
         )
-    
+
     return response
-
-
 def handle_faq_questions(user_query):
     """
-    Handle FAQ questions about policies and services.
-    
+    Handle FAQ questions about policies and services, providing concise answers suitable for standalone queries or interruptions.
+
     Args:
         user_query: The user's question
-        
+
     Returns:
-        A response addressing the FAQ
+        A string response addressing the FAQ
     """
+    # Static FAQ dictionary for quick lookups
     faqs = {
-        "cooking": "Yes, cooking is allowed in all our properties. Each unit is equipped with basic cooking facilities.",
-        "visitor": "Yes, you can bring visitors. However, please inform us or seek permission before hosting anyone overnight.",
-        "parking": "Yes, parking is available at most of our properties. Could you please share your vehicle plate number so we can arrange parking access?",
-        "charges": "Besides rent, there are a few additional charges:\n- Housekeeping: S$30 monthly\n- Air conditioning service: S$60 quarterly\n- Utilities are typically charged based on usage"
+        "cooking": "Yes, cooking is allowed in all our properties. Each unit has basic cooking facilities.",
+        "visitor": "Yes, you can bring visitors. Please inform us before hosting anyone overnight.",
+        "parking": "Yes, parking is available at most properties. Please share your vehicle plate number for access.",
+        "charges": "Besides rent, expect:\n- Housekeeping: S$30/month\n- AC service: S$60/quarter\n- Utilities based on usage."
     }
     
+    # Check for direct matches first
+    query_lower = user_query.lower()
     for keyword, answer in faqs.items():
-        if keyword in user_query.lower():
-            return answer  # Direct response, no LLM needed
+        if keyword in query_lower:
+            return answer  # Return static response immediately
 
+    # If no static match, use LLM for a dynamic response
     faqs_str = "\n".join([f"{key}: {value}" for key, value in faqs.items()])
     
     template = """
-    You are Aba from Adobha Co-living. Based on the user's question, determine the appropriate response using the following FAQs:
+You are Aba from Adobha Co-living. Answer the user's question based on the available FAQs or provide a helpful response consistent with Adobha policies if no exact match exists.
 
-    Available FAQs:
-    {faqs_str}
+Available FAQs:
+{faqs_str}
 
-    Categories and instructions:
-    - cooking (if about cooking, food preparation)
-    - visitor (if about guests, visitors)
-    - parking (if about parking, vehicles)
-    - charges (if about additional fees, costs beyond rent)
-    - other (if it doesn't match any predefined category)
+User Question: {user_query}
 
-    User question: {user_query}
+Instructions:
+- If the question matches a predefined FAQ (cooking, visitor, parking, charges), return the exact response from the FAQs.
+- If the question doesn’t match, provide a concise, helpful answer based on general co-living policies, avoiding contradictions with the FAQs.
+- Keep the response short and conversational, suitable for standalone queries or mid-conversation interruptions.
 
-    If the question matches a category (cooking, visitor, parking, charges), return the exact response from the FAQs above.
-    If the category is "other", provide a helpful and informative response consistent with Adobha Co-living policies, using the FAQs as context to avoid contradictions.
-
-    Format your response as:
-    CATEGORY: <category>
-    RESPONSE: <response text>
-    """
-
+Format your response as plain text (no categories or special formatting).
+"""
     prompt = ChatPromptTemplate.from_template(template)
     llm = ChatOpenAI(model="gpt-4o-mini")
     chain = prompt | llm | StrOutputParser()
     
-    result = chain.invoke({"user_query": user_query, "faqs_str": faqs_str})
-
-    import re
-    match = re.search(r"CATEGORY:\s*(\w+)\s*RESPONSE:\s*(.*)", result, re.DOTALL)
-    if match:
-        category = match.group(1).strip().lower()
-        response = match.group(2).strip()
-    else:
-        logger.error(f"Unexpected LLM response format: {result}")
-        response = "I’m not sure how to answer that right now. Could you please rephrase your question?"
-
-    return response
-
-import re
-import logging
-
-logger = logging.getLogger(__name__)
+    try:
+        response = chain.invoke({"user_query": user_query, "faqs_str": faqs_str})
+        logger.info(f"FAQ response generated: {response}")
+        return response.strip()
+    except Exception as e:
+        logger.error(f"Error generating FAQ response: {e}")
+        return "I’m not sure how to answer that right now. Could you rephrase your question?"
 
 def extract_and_schedule_viewing(user_query):
     room_results = st.session_state.get("last_room_results", {})
-    viewing_details = st.session_state["viewing_details"]
+    viewing_details = st.session_state.get("viewing_details", {
+        "name": "Not provided",
+        "phone": "Not provided",
+        "date_time": "Not provided",
+        "selected_property": "Not provided",
+        "property_address": "Not available"
+    })
     chat_history = st.session_state.get("chat_history", [])
 
     # Prepare available properties context
@@ -983,16 +959,11 @@ def extract_and_schedule_viewing(user_query):
         results_context = "No recent search results available. Please search for rooms first."
 
     # Prepare chat history
-    history_str = ""
-    if chat_history:
-        for msg in chat_history[-5:]:
-            role = "user" if msg.__class__.__name__ == "HumanMessage" else "assistant"
-            content = getattr(msg, "content", "Unknown message content")
-            history_str += f"{role}: {content}\n"
+    history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history[-5:]]) if chat_history else ""
 
     # Get or fetch property address if a property is selected
     property_address = viewing_details.get("property_address", "Not available")
-    if "selected_property" in viewing_details and viewing_details["selected_property"] != "Not provided":
+    if viewing_details.get("selected_property") != "Not provided":
         property_name = viewing_details["selected_property"]
         address_query = f"SELECT add1 FROM properties WHERE BuildingName = '{property_name}' LIMIT 1"
         address_result = execute_query(address_query)
@@ -1001,9 +972,9 @@ def extract_and_schedule_viewing(user_query):
                             else "Address not available")
         viewing_details["property_address"] = property_address
 
-    # Define the prompt
-    template = """ 
-You are Aba from Adobha Co-living. Your role is to assist users in scheduling a property viewing by collecting their details step-by-step and confirming the booking once all information is provided.
+    # Updated prompt to handle interruptions
+    template = """
+You are Aba from Adobha Co-living. Your role is to assist users in scheduling a property viewing by collecting their details step-by-step and confirming the booking once all information is provided. You should also handle any unrelated questions the user might ask during the process.
 
 ## **Chat History (Recent Messages):**  
 {history_str}  
@@ -1025,14 +996,23 @@ You are Aba from Adobha Co-living. Your role is to assist users in scheduling a 
 
 ## **Instructions:**  
 
-### **1. Collect Details Step-by-Step**  
+### **1. Analyze the User's Message**  
+- **If the user provides a detail** (e.g., name, phone, date/time, property), extract that information.  
+- **If the user asks an unrelated question** (e.g., about policies or services), provide a brief answer.  
+- **If the message is vague or unclear**, prompt the user for the next required detail.
+
+### **2. Collect Details Step-by-Step**  
 - If the user hasn’t chosen a property yet, list the available properties and ask, "Which property would you like to view?"  
-- Once a property is selected, collect details one at a time:  
+- Once a property is selected, collect the following details one at a time:  
   - If Name is "Not provided": Ask, "May I have your name?"  
   - If Phone is "Not provided": Ask, "Can you share your phone number? (e.g., +65XXXXXXXX)"  
   - If Date & Time is "Not provided": Ask, "When would you like to schedule the viewing? (e.g., 15 Oct 2025, 2 PM)"  
 
-### **2. Confirm Booking When All Details Are Provided**  
+### **3. Handle Unrelated Questions**  
+- If the user asks a question unrelated to scheduling, provide a brief answer and then continue with the next step in the scheduling process. For example:  
+  "I can help with that! [brief answer]. Now, back to scheduling: [next question]."  
+
+### **4. Confirm Booking When All Details Are Provided**  
 - If all details (Name, Phone, Date & Time, Selected Property) are provided (not "Not provided"), confirm the booking with:  
   "Thank you! Your viewing is scheduled:  
   - Name: [name]  
@@ -1041,9 +1021,6 @@ You are Aba from Adobha Co-living. Your role is to assist users in scheduling a 
   - Property: [property_name]  
   - Address: [property_address]  
   Our team will contact you for confirmation. Thank you for using Adobha services!"  
-
-### **3. Handle Vague Responses**  
-- If the user says something vague (e.g., "yes" or "I’m interested"), prompt for the next missing detail based on the current state.
 
 ---
 
@@ -1060,7 +1037,7 @@ Your response must be in two parts, separated by "\n\nRESPONSE:\n":
    - Only extract details explicitly provided in the user’s query; otherwise, retain the current value.
 
 2. **RESPONSE:**  
-   - Provide the conversational response to the user.  
+   - Provide the conversational response to the user, including any answers to unrelated questions and the next prompt for scheduling.
 
 Example:  
 EXTRACTED:  
@@ -1076,7 +1053,6 @@ Great! You’ve selected Tan Tong Meng Towers. May I have your name?
     llm = ChatOpenAI(model="gpt-4o-mini")
     chain = prompt | llm | StrOutputParser()
 
-    # Invoke the LLM and log the response
     result = chain.invoke({
         "history_str": history_str,
         "user_query": user_query,
@@ -1097,15 +1073,16 @@ Great! You’ve selected Tan Tong Meng Towers. May I have your name?
         extracted_data = extracted_match.group(1).strip()
         response_text = response_match.group(1).strip()
 
-        # Update viewing_details with extracted data
+        # Update viewing_details only if new details are provided
         for line in extracted_data.split("\n"):
             if ": " in line:
                 key, value = line.split(": ", 1)
-                if key == "Phone" and value != "Not provided":
-                    value = re.sub(r'[^\d]', '', value)
-                    if not value.startswith("65") and len(value) == 8:
-                        value = "+65" + value
-                viewing_details[key.lower().replace(" ", "_")] = value
+                if value != "Not provided":
+                    if key == "Phone":
+                        value = re.sub(r'[^\d]', '', value)
+                        if not value.startswith("65") and len(value) == 8:
+                            value = "+65" + value
+                    viewing_details[key.lower().replace(" ", "_")] = value
 
         # Update property address if a property is selected
         if viewing_details.get("selected_property") != "Not provided":
@@ -1120,11 +1097,11 @@ Great! You’ve selected Tan Tong Meng Towers. May I have your name?
         # Save updated details to session state
         st.session_state["viewing_details"] = viewing_details
 
+        # Reset step if booking is confirmed
         if all(viewing_details.get(key) != "Not provided" for key in ["name", "phone", "date_time", "selected_property"]):
             if "Your viewing is scheduled" in response_text:
                 st.session_state["current_step"] = None 
 
-        st.session_state["viewing_details"] = viewing_details
         return response_text
     else:
         logger.error(f"Unexpected response format: {result}")
